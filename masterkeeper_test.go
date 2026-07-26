@@ -2,7 +2,7 @@ package masterkeeper_test
 
 import (
 	"fmt"
-	keeper "masterkeeper"
+	keeper "github.com/lemadane/keepermaster"
 	"os"
 	"path/filepath"
 	"reflect"

@@ -17,10 +17,10 @@
 
 ## Installation
 
-Initialize your project and import the `masterkeeper` package directly:
+Initialize your project and import the `masterkeeper` package via its GitHub module path:
 
 ```go
-import "masterkeeper"
+import "github.com/lemadane/keepermaster"
 ```
 
 ---
