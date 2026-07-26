@@ -1,0 +1,22 @@
+# Go binaries and files
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Database data, logs, backups, and temp test files
+*.db
+*.log
+wal.log
+snapshot.*
+keeper-test-*
+keeper-backup-*
+
+# IDEs and OS metadata
+.idea/
+.vscode/
+.DS_Store
+*~
