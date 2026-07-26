@@ -20,7 +20,7 @@
 Initialize your project and import the `masterkeeper` package via its GitHub module path:
 
 ```go
-import "github.com/lemadane/keepermaster"
+import "github.com/lemadane/masterkeeper"
 ```
 
 ---

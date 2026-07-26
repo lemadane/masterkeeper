@@ -1,3 +1,3 @@
-module github.com/lemadane/keepermaster
+module github.com/lemadane/masterkeeper
 
 go 1.22.5

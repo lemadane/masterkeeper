@@ -2,7 +2,7 @@ package masterkeeper_test
 
 import (
 	"fmt"
-	keeper "github.com/lemadane/keepermaster"
+	keeper "github.com/lemadane/masterkeeper"
 	"math/rand"
 	"os"
 	"sync"
