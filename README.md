@@ -12,6 +12,7 @@
 - **Disk Space Compaction**: Reclaims space by purging deleted or updated records from active table storage files.
 - **JSON Import/Export**: Easily dump database tables to JSON format and restore them dynamically.
 - **Hot Backups**: Consistent point-in-time database backups performed while the database remains active and online.
+- **SQL Migrator**: Supports one-click, zero-dependency schema, index, and record migration to **PostgreSQL**, **MySQL**, **MariaDB**, **SQLite**, and **Microsoft SQL Server**. Handles type mappings, index constraints, and nested structures automatically.
 
 ---
 
@@ -102,6 +103,49 @@ if err != nil {
 ```
 
 To restore from a backup, simply point the `masterkeeper.Open` directory path to the backup folder.
+
+---
+
+## SQL Migration
+
+MasterKeeper includes a Go-native `SQLMigrator` module that allows developers to easily migrate schemas, indices, and records from a MasterKeeper embedded database to a relational SQL database.
+
+It supports:
+- **PostgreSQL**
+- **MySQL / MariaDB**
+- **SQLite**
+- **Microsoft SQL Server (MSSQL)**
+
+### Usage
+
+Open a standard `database/sql` connection to your target relational database, choose the corresponding dialect, and call `keeper.Migrate`:
+
+```go
+import (
+    "database/sql"
+    _ "modernc.org/sqlite" // or any other driver
+    keeper "github.com/lemadane/masterkeeper"
+)
+
+// Open target SQL database
+sqlDB, err := sql.Open("sqlite", "./target.db")
+if err != nil {
+    log.Fatal(err)
+}
+defer sqlDB.Close()
+
+// Migrate schemas, indices, and all records from MasterKeeper
+err = keeper.Migrate(db, sqlDB, keeper.DialectSQLite)
+if err != nil {
+    log.Fatalf("migration failed: %v", err)
+}
+```
+
+The migrator will automatically:
+1. Map Go datatypes to dialect-specific SQL datatypes (e.g. mapping `time.Time` to `DATETIME`/`TIMESTAMPTZ`, mapping nested structs to `TEXT` JSON).
+2. Generate and run `CREATE TABLE IF NOT EXISTS` commands (using conditional check blocks for MSSQL).
+3. Generate and run index creation scripts (respecting `unique` and `ordered` constraints).
+4. Perform batch insertions of existing records inside SQL transactions.
 
 ---
 
