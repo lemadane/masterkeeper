@@ -215,19 +215,31 @@ Execution summary:
 === RUN   TestAsyncAndBatchedDurability
 === RUN   TestAsyncAndBatchedDurability/Mode_2
 === RUN   TestAsyncAndBatchedDurability/Mode_1
---- PASS: TestAsyncAndBatchedDurability (0.12s)
+--- PASS: TestAsyncAndBatchedDurability (0.11s)
     --- PASS: TestAsyncAndBatchedDurability/Mode_2 (0.00s)
     --- PASS: TestAsyncAndBatchedDurability/Mode_1 (0.11s)
 === RUN   TestHotBackup
 --- PASS: TestHotBackup (0.00s)
+=== RUN   TestSQLiteMigrationIntegration
+--- PASS: TestSQLiteMigrationIntegration (0.00s)
+=== RUN   TestMigrateAllDialects
+=== RUN   TestMigrateAllDialects/PostgreSQL
+=== RUN   TestMigrateAllDialects/MySQL
+=== RUN   TestMigrateAllDialects/SQLite
+=== RUN   TestMigrateAllDialects/MSSQL
+--- PASS: TestMigrateAllDialects (0.00s)
+    --- PASS: TestMigrateAllDialects/PostgreSQL (0.00s)
+    --- PASS: TestMigrateAllDialects/MySQL (0.00s)
+    --- PASS: TestMigrateAllDialects/SQLite (0.00s)
+    --- PASS: TestMigrateAllDialects/MSSQL (0.00s)
 === RUN   TestStressSyncSingleTable
---- PASS: TestStressSyncSingleTable (28.33s)
+--- PASS: TestStressSyncSingleTable (25.60s)
 === RUN   TestStressAsyncSingleTable
---- PASS: TestStressAsyncSingleTable (25.09s)
+--- PASS: TestStressAsyncSingleTable (25.85s)
 === RUN   TestStressSyncMultiTable
---- PASS: TestStressSyncMultiTable (19.39s)
+--- PASS: TestStressSyncMultiTable (19.15s)
 === RUN   TestStressAsyncMultiTable
---- PASS: TestStressAsyncMultiTable (19.97s)
+--- PASS: TestStressAsyncMultiTable (19.49s)
 PASS
-ok      masterkeeper    93.014s
+ok      github.com/lemadane/masterkeeper        90.319s
 ```
