@@ -29,9 +29,9 @@ func Migrate(database *Database, sqlDatabase *sql.DB, dialect SQLDialect) error 
 
 	committed := database.getCommittedState()
 	for tableName, tableState := range committed.Tables {
-		tableStorageVal, err := database.getTableStorage(tableName)
-		if err != nil {
-			return err
+		tableStorageValue, error := database.getTableStorage(tableName)
+		if error != nil {
+			return error
 		}
 
 		// 1. Reflect EntityType fields to construct column definitions
@@ -79,8 +79,8 @@ END`, tableName, quoteIdentifier(tableName, dialect), strings.Join(columnDefs, "
 			)
 		}
 
-		if _, err := sqlDatabase.Exec(createTableSQL); err != nil {
-			return fmt.Errorf("failed to create table %s: %w", tableName, err)
+		if _, error := sqlDatabase.Exec(createTableSQL); error != nil {
+			return fmt.Errorf("failed to create table %s: %w", tableName, error)
 		}
 
 		// 3. Create Indexes
@@ -125,13 +125,13 @@ END`,
 				)
 			}
 
-			_, err := sqlDatabase.Exec(indexSQL)
-			if err != nil {
+			_, error := sqlDatabase.Exec(indexSQL)
+			if error != nil {
 				// For MySQL, catch "Duplicate key name" error (ErrorCode 1061)
-				if dialect == DialectMySQL && (strings.Contains(err.Error(), "1061") || strings.Contains(strings.ToLower(err.Error()), "duplicate key name")) {
+				if dialect == DialectMySQL && (strings.Contains(error.Error(), "1061") || strings.Contains(strings.ToLower(error.Error()), "duplicate key name")) {
 					// Already exists, ignore
 				} else {
-					return fmt.Errorf("failed to create index %s on table %s: %w", indexName, tableName, err)
+					return fmt.Errorf("failed to create index %s on table %s: %w", indexName, tableName, error)
 				}
 			}
 		}
@@ -139,13 +139,13 @@ END`,
 		// 4. Retrieve and Insert Records
 		var records []any
 		for _, recordPointer := range tableState.RecordPointers {
-			bytesValue, err := tableStorageVal.ReadRecord(recordPointer)
-			if err != nil {
-				return fmt.Errorf("failed to read record from table %s: %w", tableName, err)
+			bytesValue, error := tableStorageValue.ReadRecord(recordPointer)
+			if error != nil {
+				return fmt.Errorf("failed to read record from table %s: %w", tableName, error)
 			}
 			newRecordValue := reflect.New(tableState.EntityType)
-			if err := Unmarshal(bytesValue, newRecordValue.Interface()); err != nil {
-				return fmt.Errorf("failed to unmarshal record from table %s: %w", tableName, err)
+			if error := Unmarshal(bytesValue, newRecordValue.Interface()); error != nil {
+				return fmt.Errorf("failed to unmarshal record from table %s: %w", tableName, error)
 			}
 			records = append(records, newRecordValue.Elem().Interface())
 		}
@@ -161,9 +161,9 @@ END`,
 		}
 
 		// Execute insertions in a transaction
-		sqlTransaction, err := sqlDatabase.Begin()
-		if err != nil {
-			return fmt.Errorf("failed to begin SQL transaction for table %s: %w", tableName, err)
+		sqlTransaction, error := sqlDatabase.Begin()
+		if error != nil {
+			return fmt.Errorf("failed to begin SQL transaction for table %s: %w", tableName, error)
 		}
 
 		insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
@@ -172,35 +172,35 @@ END`,
 			strings.Join(placeholders, ", "),
 		)
 
-		sqlStatement, err := sqlTransaction.Prepare(insertSQL)
-		if err != nil {
+		sqlStatement, error := sqlTransaction.Prepare(insertSQL)
+		if error != nil {
 			sqlTransaction.Rollback()
-			return fmt.Errorf("failed to prepare insert statement for table %s: %w", tableName, err)
+			return fmt.Errorf("failed to prepare insert statement for table %s: %w", tableName, error)
 		}
 
 		for _, record := range records {
 			reflectValue := reflect.ValueOf(record)
 			var args []any
 			for _, fName := range fieldNames {
-				fieldVal := reflectValue.FieldByName(fName)
-				boundValue, err := bindValue(fieldVal, dialect)
-				if err != nil {
+				fieldValue := reflectValue.FieldByName(fName)
+				boundValue, error := bindValue(fieldValue, dialect)
+				if error != nil {
 					sqlStatement.Close()
 					sqlTransaction.Rollback()
-					return fmt.Errorf("failed to bind field value in table %s: %w", tableName, err)
+					return fmt.Errorf("failed to bind field value in table %s: %w", tableName, error)
 				}
 				args = append(args, boundValue)
 			}
-			if _, err := sqlStatement.Exec(args...); err != nil {
+			if _, error := sqlStatement.Exec(args...); error != nil {
 				sqlStatement.Close()
 				sqlTransaction.Rollback()
-				return fmt.Errorf("failed to insert record into table %s: %w", tableName, err)
+				return fmt.Errorf("failed to insert record into table %s: %w", tableName, error)
 			}
 		}
 
 		sqlStatement.Close()
-		if err := sqlTransaction.Commit(); err != nil {
-			return fmt.Errorf("failed to commit SQL transaction for table %s: %w", tableName, err)
+		if error := sqlTransaction.Commit(); error != nil {
+			return fmt.Errorf("failed to commit SQL transaction for table %s: %w", tableName, error)
 		}
 	}
 
@@ -361,9 +361,9 @@ func bindValue(reflectValue reflect.Value, dialect SQLDialect) (any, error) {
 				return timeValue, nil
 			}
 		}
-		jsonBytes, err := json.Marshal(reflectValue.Interface())
-		if err != nil {
-			return nil, err
+		jsonBytes, error := json.Marshal(reflectValue.Interface())
+		if error != nil {
+			return nil, error
 		}
 		return string(jsonBytes), nil
 
@@ -371,16 +371,16 @@ func bindValue(reflectValue reflect.Value, dialect SQLDialect) (any, error) {
 		if reflectValue.Type().Elem().Kind() == reflect.Uint8 {
 			return reflectValue.Bytes(), nil
 		}
-		jsonBytes, err := json.Marshal(reflectValue.Interface())
-		if err != nil {
-			return nil, err
+		jsonBytes, error := json.Marshal(reflectValue.Interface())
+		if error != nil {
+			return nil, error
 		}
 		return string(jsonBytes), nil
 
 	default:
-		jsonBytes, err := json.Marshal(reflectValue.Interface())
-		if err != nil {
-			return nil, err
+		jsonBytes, error := json.Marshal(reflectValue.Interface())
+		if error != nil {
+			return nil, error
 		}
 		return string(jsonBytes), nil
 	}

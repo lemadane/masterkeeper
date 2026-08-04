@@ -29,7 +29,7 @@ func (tableChangeSet *TableChangeSet) IsEmpty() bool {
 type IndexChange struct {
 	TableName  string
 	IndexName  string
-	IndexVal   any
+	IndexValue   any
 	PrimaryKey any
 }
 
@@ -42,7 +42,7 @@ func (indexChangeSet *IndexChangeSet) Add(tableName, indexName string, indexValu
 	indexChangeSet.Added = append(indexChangeSet.Added, IndexChange{
 		TableName:  tableName,
 		IndexName:  indexName,
-		IndexVal:   indexValue,
+		IndexValue:   indexValue,
 		PrimaryKey: primaryKey,
 	})
 }
@@ -51,7 +51,7 @@ func (indexChangeSet *IndexChangeSet) Remove(tableName, indexName string, indexV
 	indexChangeSet.Removed = append(indexChangeSet.Removed, IndexChange{
 		TableName:  tableName,
 		IndexName:  indexName,
-		IndexVal:   indexValue,
+		IndexValue:   indexValue,
 		PrimaryKey: primaryKey,
 	})
 }
@@ -130,10 +130,10 @@ func (transaction *Transaction) Rollback() error {
 	transaction.active = false
 	defer transaction.database.releaseWriterLock()
 
-	nextGen := transaction.database.currentGeneration() + 1
-	err := transaction.database.walManager.AppendRollbackMarker(transaction.transactionID, nextGen, transaction.changeSet.RollbackReason)
-	if err != nil {
-		return fmt.Errorf("failed to write rollback marker to WAL: %w", err)
+	nextGenerationeration := transaction.database.currentGeneration() + 1
+	error := transaction.database.walManager.AppendRollbackMarker(transaction.transactionID, nextGenerationeration, transaction.changeSet.RollbackReason)
+	if error != nil {
+		return fmt.Errorf("failed to write rollback marker to WAL: %w", error)
 	}
 
 	return nil
@@ -141,23 +141,23 @@ func (transaction *Transaction) Rollback() error {
 
 func (transaction *Transaction) Commit() error {
 	if !transaction.active {
-		return ErrTransactionNotActive
+		return NotActiveTransactionError
 	}
 	if transaction.changeSet.RollbackOnly {
 		_ = transaction.Rollback()
-		return fmt.Errorf("%w: %s", ErrRollbackOnly, transaction.changeSet.RollbackReason)
+		return fmt.Errorf("%w: %s", RollbackOnlyTransactionError, transaction.changeSet.RollbackReason)
 	}
 
 	transaction.active = false
 	defer transaction.database.releaseWriterLock()
 
 	// 1. Validate unique indexes
-	if err := transaction.validateUniqueIndexes(); err != nil {
+	if error := transaction.validateUniqueIndexes(); error != nil {
 		_ = transaction.Rollback()
-		return err
+		return error
 	}
 
-	nextGen := transaction.database.currentGeneration() + 1
+	nextGenerationeration := transaction.database.currentGeneration() + 1
 
 	// 2. Prepare WAL records and Table appends
 	var walRecords []WalRecord
@@ -186,7 +186,7 @@ func (transaction *Transaction) Commit() error {
 			walRecords = append(walRecords, WalRecord{
 				Type:          OpClearTable,
 				TransactionID: transaction.transactionID,
-				Generation:    nextGen,
+				Generation:    nextGenerationeration,
 				Payload:       buf.Bytes(),
 			})
 		}
@@ -205,7 +205,7 @@ func (transaction *Transaction) Commit() error {
 			walRecords = append(walRecords, WalRecord{
 				Type:          OpDelete,
 				TransactionID: transaction.transactionID,
-				Generation:    nextGen,
+				Generation:    nextGenerationeration,
 				Payload:       buf.Bytes(),
 			})
 		}
@@ -225,9 +225,9 @@ func (transaction *Transaction) Commit() error {
 
 		// Inserts log and preparation for table appends
 		for _, record := range insertsList {
-			recBytes, err := Marshal(record)
-			if err != nil {
-				return fmt.Errorf("failed to serialize record for commit: %w", err)
+			recBytes, error := Marshal(record)
+			if error != nil {
+				return fmt.Errorf("failed to serialize record for commit: %w", error)
 			}
 			tableAppends[tableName] = append(tableAppends[tableName], recBytes)
 
@@ -240,16 +240,16 @@ func (transaction *Transaction) Commit() error {
 			walRecords = append(walRecords, WalRecord{
 				Type:          OpInsert,
 				TransactionID: transaction.transactionID,
-				Generation:    nextGen,
+				Generation:    nextGenerationeration,
 				Payload:       buf.Bytes(),
 			})
 		}
 
 		// Updates log and preparation for table appends
 		for _, record := range updatesList {
-			recBytes, err := Marshal(record)
-			if err != nil {
-				return fmt.Errorf("failed to serialize record for commit: %w", err)
+			recBytes, error := Marshal(record)
+			if error != nil {
+				return fmt.Errorf("failed to serialize record for commit: %w", error)
 			}
 			tableAppends[tableName] = append(tableAppends[tableName], recBytes)
 
@@ -262,7 +262,7 @@ func (transaction *Transaction) Commit() error {
 			walRecords = append(walRecords, WalRecord{
 				Type:          OpUpdate,
 				TransactionID: transaction.transactionID,
-				Generation:    nextGen,
+				Generation:    nextGenerationeration,
 				Payload:       buf.Bytes(),
 			})
 		}
@@ -273,7 +273,7 @@ func (transaction *Transaction) Commit() error {
 		doneChan := make(chan WriteResult, 1)
 		task := &WriteTask{
 			TxID:         transaction.transactionID,
-			Generation:   nextGen,
+			Generation:   nextGenerationeration,
 			WalRecords:   walRecords,
 			TableAppends: tableAppends,
 			Done:         doneChan,
@@ -281,12 +281,12 @@ func (transaction *Transaction) Commit() error {
 
 		transaction.database.walManager.Submit(task)
 		result := <-doneChan
-		if result.Err != nil {
-			return fmt.Errorf("background write failure: %w", result.Err)
+		if result.Error != nil {
+			return fmt.Errorf("background write failure: %w", result.Error)
 		}
 
 		// 4. Update DatabaseState in memory
-		nextState := transaction.committedState.Copy(nextGen)
+		nextState := transaction.committedState.Copy(nextGenerationeration)
 		for tableName, tableChangeSet := range transaction.changeSet.TableChanges {
 			tableState := nextState.Tables[tableName]
 			if tableState == nil {
@@ -299,32 +299,32 @@ func (transaction *Transaction) Commit() error {
 
 			// Apply deletes
 			for key := range tableChangeSet.Deletes {
-				oldRecord, err := transaction.readCommittedRecord(tableName, key)
-				if err != nil {
-					return err
+				oldRecord, error := transaction.readCommittedRecord(tableName, key)
+				if error != nil {
+					return error
 				}
 				tableState.Delete(key, oldRecord)
 			}
 
 			// Apply inserts using generated pointers from background writer
 			generatedPointers := result.Pointers[tableName]
-			pointerIdx := 0
+			pointerIndex := 0
 
 			// Inserts first
 			for _, record := range insertsOrder[tableName] {
-				ptr := generatedPointers[pointerIdx]
-				pointerIdx++
+				ptr := generatedPointers[pointerIndex]
+				pointerIndex++
 				tableState.Insert(record, ptr)
 			}
 
 			// Updates second
 			for _, record := range updatesOrder[tableName] {
-				ptr := generatedPointers[pointerIdx]
-				pointerIdx++
+				ptr := generatedPointers[pointerIndex]
+				pointerIndex++
 				key := getPrimaryKey(record)
-				oldRecord, err := transaction.readCommittedRecord(tableName, key)
-				if err != nil {
-					return err
+				oldRecord, error := transaction.readCommittedRecord(tableName, key)
+				if error != nil {
+					return error
 				}
 				tableState.Update(record, oldRecord, ptr)
 			}
@@ -345,21 +345,21 @@ func (transaction *Transaction) readCommittedRecord(tableName string, key any) (
 	if !found {
 		return nil, nil
 	}
-	tableStorage, err := transaction.database.getTableStorage(tableName)
-	if err != nil {
-		return nil, err
+	tableStorage, error := transaction.database.getTableStorage(tableName)
+	if error != nil {
+		return nil, error
 	}
-	bytesValue, err := tableStorage.ReadRecord(recordPointer)
-	if err != nil {
-		return nil, err
+	bytesValue, error := tableStorage.ReadRecord(recordPointer)
+	if error != nil {
+		return nil, error
 	}
 	// deserialize
-	newRecordVal := reflect.New(tableState.EntityType)
-	err = Unmarshal(bytesValue, newRecordVal.Interface())
-	if err != nil {
-		return nil, err
+	newRecordValue := reflect.New(tableState.EntityType)
+	error = Unmarshal(bytesValue, newRecordValue.Interface())
+	if error != nil {
+		return nil, error
 	}
-	return newRecordVal.Elem().Interface(), nil
+	return newRecordValue.Elem().Interface(), nil
 }
 
 func (transaction *Transaction) validateUniqueIndexes() error {
@@ -384,8 +384,8 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 
 			if !tableChangeSet.Cleared {
 				for key := range tableChangeSet.Deletes {
-					oldRecord, err := transaction.readCommittedRecord(tableName, key)
-					if err == nil && oldRecord != nil {
+					oldRecord, error := transaction.readCommittedRecord(tableName, key)
+					if error == nil && oldRecord != nil {
 						indexValue := getFieldValue(oldRecord, indexMetadata.FieldName)
 						if indexValue != nil {
 							txRemovedUnique[indexValue] = struct{}{}
@@ -393,8 +393,8 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 					}
 				}
 				for key := range tableChangeSet.Updates {
-					oldRecord, err := transaction.readCommittedRecord(tableName, key)
-					if err == nil && oldRecord != nil {
+					oldRecord, error := transaction.readCommittedRecord(tableName, key)
+					if error == nil && oldRecord != nil {
 						indexValue := getFieldValue(oldRecord, indexMetadata.FieldName)
 						if indexValue != nil {
 							txRemovedUnique[indexValue] = struct{}{}
@@ -410,7 +410,7 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 
 				if existingKey, exists := txAddedUnique[indexValue]; exists {
 					if existingKey != key {
-						return &ErrDuplicateIndex{
+						return &DuplicateIndexError{
 							TableName: tableName,
 							IndexName: indexMetadata.IndexName,
 							Value:     indexValue,
@@ -424,7 +424,7 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 					if _, removed := txRemovedUnique[indexValue]; !removed {
 						if existingKey, exists := committedIndex.UniqueMap[indexValue]; exists {
 							if existingKey != key {
-								return &ErrDuplicateIndex{
+								return &DuplicateIndexError{
 									TableName: tableName,
 									IndexName: indexMetadata.IndexName,
 									Value:     indexValue,
@@ -440,14 +440,14 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 			}
 
 			for key, record := range tableChangeSet.Inserts {
-				if err := checkConflict(key, getFieldValue(record, indexMetadata.FieldName)); err != nil {
-					return err
+				if error := checkConflict(key, getFieldValue(record, indexMetadata.FieldName)); error != nil {
+					return error
 				}
 			}
 
 			for key, record := range tableChangeSet.Updates {
-				if err := checkConflict(key, getFieldValue(record, indexMetadata.FieldName)); err != nil {
-					return err
+				if error := checkConflict(key, getFieldValue(record, indexMetadata.FieldName)); error != nil {
+					return error
 				}
 			}
 		}
@@ -457,25 +457,25 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 
 func (transaction *Transaction) InsertDynamic(tableName string, record any) error {
 	if !transaction.active {
-		return ErrTransactionNotActive
+		return NotActiveTransactionError
 	}
 
-	primaryKeyVal := getPrimaryKey(record)
-	if primaryKeyVal == nil {
+	primaryKeyValue := getPrimaryKey(record)
+	if primaryKeyValue == nil {
 		return fmt.Errorf("primary key ID cannot be nil")
 	}
 
 	tableChangeSet := transaction.changeSet.GetTableChanges(tableName)
 	exists := false
-	if _, found := tableChangeSet.Inserts[primaryKeyVal]; found {
+	if _, found := tableChangeSet.Inserts[primaryKeyValue]; found {
 		exists = true
-	} else if _, found := tableChangeSet.Updates[primaryKeyVal]; found {
+	} else if _, found := tableChangeSet.Updates[primaryKeyValue]; found {
 		exists = true
 	} else if !tableChangeSet.Cleared {
-		if _, found := tableChangeSet.Deletes[primaryKeyVal]; !found {
+		if _, found := tableChangeSet.Deletes[primaryKeyValue]; !found {
 			tableState := transaction.committedState.Tables[tableName]
 			if tableState != nil {
-				if _, found := tableState.RecordPointers[primaryKeyVal]; found {
+				if _, found := tableState.RecordPointers[primaryKeyValue]; found {
 					exists = true
 				}
 			}
@@ -486,14 +486,14 @@ func (transaction *Transaction) InsertDynamic(tableName string, record any) erro
 		return fmt.Errorf("record already exists in table '%s'", tableName)
 	}
 
-	tableChangeSet.Inserts[primaryKeyVal] = record
+	tableChangeSet.Inserts[primaryKeyValue] = record
 
 	// Index additions
 	tableState := transaction.committedState.Tables[tableName]
 	if tableState != nil {
 		for _, indexState := range tableState.Indexes {
 			indexValue := getFieldValue(record, indexState.Metadata.FieldName)
-			transaction.changeSet.IndexChanges.Add(tableName, indexState.Metadata.IndexName, indexValue, primaryKeyVal)
+			transaction.changeSet.IndexChanges.Add(tableName, indexState.Metadata.IndexName, indexValue, primaryKeyValue)
 		}
 	}
 

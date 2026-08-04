@@ -38,48 +38,48 @@ func clearRecordedQueries() {
 
 type mockDriver struct{}
 
-func (driverVal *mockDriver) Open(name string) (driver.Conn, error) {
-	return &mockConn{}, nil
+func (driverValue *mockDriver) Open(name string) (driver.Conn, error) {
+	return &mockConnection{}, nil
 }
 
-type mockConn struct{}
+type mockConnection struct{}
 
-func (connection *mockConn) Prepare(query string) (driver.Stmt, error) {
+func (connection *mockConnection) Prepare(query string) (driver.Stmt, error) {
 	recordQuery(query)
-	return &mockStmt{query: query}, nil
+	return &mockStatement{query: query}, nil
 }
 
-func (connection *mockConn) Close() error { return nil }
+func (connection *mockConnection) Close() error { return nil }
 
-func (connection *mockConn) Begin() (driver.Tx, error) {
-	return &mockTx{}, nil
+func (connection *mockConnection) Begin() (driver.Tx, error) {
+	return &mockTransaction{}, nil
 }
 
-func (connection *mockConn) Exec(query string, args []driver.Value) (driver.Result, error) {
+func (connection *mockConnection) Exec(query string, args []driver.Value) (driver.Result, error) {
 	recordQuery(query)
 	return &mockResult{}, nil
 }
 
-type mockStmt struct {
+type mockStatement struct {
 	query string
 }
 
-func (statement *mockStmt) Close() error { return nil }
+func (statement *mockStatement) Close() error { return nil }
 
-func (statement *mockStmt) NumInput() int { return -1 }
+func (statement *mockStatement) NumInput() int { return -1 }
 
-func (statement *mockStmt) Exec(args []driver.Value) (driver.Result, error) {
+func (statement *mockStatement) Exec(args []driver.Value) (driver.Result, error) {
 	return &mockResult{}, nil
 }
 
-func (statement *mockStmt) Query(args []driver.Value) (driver.Rows, error) {
+func (statement *mockStatement) Query(args []driver.Value) (driver.Rows, error) {
 	return nil, nil
 }
 
-type mockTx struct{}
+type mockTransaction struct{}
 
-func (transaction *mockTx) Commit() error   { return nil }
-func (transaction *mockTx) Rollback() error { return nil }
+func (transaction *mockTransaction) Commit() error   { return nil }
+func (transaction *mockTransaction) Rollback() error { return nil }
 
 type mockResult struct{}
 
@@ -107,22 +107,22 @@ type MigrationUser struct {
 	Metadata MigrationNestedStruct
 }
 
-func TestMigrateAllDialects(testingT *testing.T) {
+func TestMigrateAllDialects(test *testing.T) {
 	options := keeper.DefaultOptions()
 	options.RegisterTypes(MigrationUser{})
 
-	database, err := keeper.Open(testingT.TempDir(), options)
-	if err != nil {
-		testingT.Fatalf("failed to open database: %v", err)
+	database, testError := keeper.Open(test.TempDir(), options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
 	}
 	defer database.Close()
 
-	userTable, err := keeper.GetTable[string, MigrationUser](database, "users")
-	if err != nil {
-		testingT.Fatalf("failed to retrieve table: %v", err)
+	userTable, testError := keeper.GetTable[string, MigrationUser](database, "users")
+	if testError != nil {
+		test.Fatalf("failed to retrieve table: %v", testError)
 	}
 
-	err = database.Transaction(func(transaction *keeper.Transaction) error {
+	testError = database.Transaction(func(transaction *keeper.Transaction) error {
 		return userTable.Insert(transaction, MigrationUser{
 			ID:      "usr_1",
 			Name:    "Alice",
@@ -138,13 +138,13 @@ func TestMigrateAllDialects(testingT *testing.T) {
 			},
 		})
 	})
-	if err != nil {
-		testingT.Fatalf("failed to insert test record: %v", err)
+	if testError != nil {
+		test.Fatalf("failed to insert test record: %v", testError)
 	}
 
-	sqlDatabase, err := sql.Open("mock_driver", "dummy_source")
-	if err != nil {
-		testingT.Fatalf("failed to open mock db: %v", err)
+	sqlDatabase, testError := sql.Open("mock_driver", "dummy_source")
+	if testError != nil {
+		test.Fatalf("failed to open mock db: %v", testError)
 	}
 	defer sqlDatabase.Close()
 
@@ -237,11 +237,11 @@ END`,
 	}
 
 	for _, testCase := range tests {
-		testingT.Run(testCase.name, func(subtestT *testing.T) {
+		test.Run(testCase.name, func(subtestT *testing.T) {
 			clearRecordedQueries()
-			err := keeper.Migrate(database, sqlDatabase, testCase.dialect)
-			if err != nil {
-				subtestT.Fatalf("failed to migrate: %v", err)
+			testError := keeper.Migrate(database, sqlDatabase, testCase.dialect)
+			if testError != nil {
+				subtestT.Fatalf("failed to migrate: %v", testError)
 			}
 
 			recorded := getRecordedQueries()
@@ -259,16 +259,16 @@ END`,
 			}
 
 			// Check index creation queries
-			for _, idxSQL := range testCase.expectedIndexSQL {
-				foundIdx := false
+			for _, indexSQLQuery := range testCase.expectedIndexSQL {
+				foundIndex := false
 				for _, queryString := range recorded {
-					if strings.Contains(strings.ReplaceAll(queryString, "\r\n", "\n"), strings.ReplaceAll(idxSQL, "\r\n", "\n")) {
-						foundIdx = true
+					if strings.Contains(strings.ReplaceAll(queryString, "\r\n", "\n"), strings.ReplaceAll(indexSQLQuery, "\r\n", "\n")) {
+						foundIndex = true
 						break
 					}
 				}
-				if !foundIdx {
-					subtestT.Errorf("expected index SQL not found: %s", idxSQL)
+				if !foundIndex {
+					subtestT.Errorf("expected index SQL not found: %s", indexSQLQuery)
 				}
 			}
 

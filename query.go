@@ -13,87 +13,87 @@ type Condition interface {
 	ExplainDetail() string
 }
 
-type conditionImpl struct {
+type queryCondition struct {
 	fieldName string
 	value     any
-	testFn    func(recordValue any) bool
+	testFunction    func(recordValue any) bool
 	desc      string
 }
 
-func (condition *conditionImpl) Test(record any) bool {
+func (condition *queryCondition) Test(record any) bool {
 	recordValue := getFieldValue(record, condition.fieldName)
-	return condition.testFn(recordValue)
+	return condition.testFunction(recordValue)
 }
 
-func (condition *conditionImpl) FieldName() string {
+func (condition *queryCondition) FieldName() string {
 	return condition.fieldName
 }
 
-func (condition *conditionImpl) ExplainDetail() string {
+func (condition *queryCondition) ExplainDetail() string {
 	return condition.desc
 }
 
-func Eq(fieldName string, value any) Condition {
-	return &conditionImpl{
+func Equal(fieldName string, value any) Condition {
+	return &queryCondition{
 		fieldName: fieldName,
 		value:     value,
 		desc:      fmt.Sprintf("%s == %v", fieldName, value),
-		testFn: func(recordValue any) bool {
+		testFunction: func(recordValue any) bool {
 			return valuesEqual(recordValue, value)
 		},
 	}
 }
 
-func Ne(fieldName string, value any) Condition {
-	return &conditionImpl{
+func NotEqual(fieldName string, value any) Condition {
+	return &queryCondition{
 		fieldName: fieldName,
 		value:     value,
 		desc:      fmt.Sprintf("%s != %v", fieldName, value),
-		testFn: func(recordValue any) bool {
+		testFunction: func(recordValue any) bool {
 			return !valuesEqual(recordValue, value)
 		},
 	}
 }
 
-func Gt(fieldName string, value any) Condition {
-	return &conditionImpl{
+func GreaterThan(fieldName string, value any) Condition {
+	return &queryCondition{
 		fieldName: fieldName,
 		value:     value,
 		desc:      fmt.Sprintf("%s > %v", fieldName, value),
-		testFn: func(recordValue any) bool {
+		testFunction: func(recordValue any) bool {
 			return compareValues(recordValue, value) > 0
 		},
 	}
 }
 
-func Ge(fieldName string, value any) Condition {
-	return &conditionImpl{
+func GreaterThanOrEqual(fieldName string, value any) Condition {
+	return &queryCondition{
 		fieldName: fieldName,
 		value:     value,
 		desc:      fmt.Sprintf("%s >= %v", fieldName, value),
-		testFn: func(recordValue any) bool {
+		testFunction: func(recordValue any) bool {
 			return compareValues(recordValue, value) >= 0
 		},
 	}
 }
 
-func Lt(fieldName string, value any) Condition {
-	return &conditionImpl{
+func LessThan(fieldName string, value any) Condition {
+	return &queryCondition{
 		fieldName: fieldName,
 		value:     value,
 		desc:      fmt.Sprintf("%s < %v", fieldName, value),
-		testFn: func(recordValue any) bool {
+		testFunction: func(recordValue any) bool {
 			return compareValues(recordValue, value) < 0
 		},
 	}
 }
 
-func Le(fieldName string, value any) Condition {
-	return &conditionImpl{
+func LessThanOrEqual(fieldName string, value any) Condition {
+	return &queryCondition{
 		fieldName: fieldName,
 		value:     value,
 		desc:      fmt.Sprintf("%s <= %v", fieldName, value),
-		testFn: func(recordValue any) bool {
+		testFunction: func(recordValue any) bool {
 			return compareValues(recordValue, value) <= 0
 		},
 	}
@@ -104,11 +104,11 @@ type SortOrder struct {
 	Ascending bool
 }
 
-func Asc(fieldName string) SortOrder {
+func Ascending(fieldName string) SortOrder {
 	return SortOrder{FieldName: fieldName, Ascending: true}
 }
 
-func Desc(fieldName string) SortOrder {
+func Descending(fieldName string) SortOrder {
 	return SortOrder{FieldName: fieldName, Ascending: false}
 }
 
@@ -172,7 +172,7 @@ func (query *Query[T]) List() ([]T, error) {
 
 	for _, condition := range query.conditions {
 		if strings.EqualFold(condition.FieldName(), "id") {
-			if equalityCondition, found := condition.(*conditionImpl); found && strings.Contains(equalityCondition.desc, "==") {
+			if equalityCondition, found := condition.(*queryCondition); found && strings.Contains(equalityCondition.desc, "==") {
 				targetIDValue := equalityCondition.value
 				targetIDs = []any{targetIDValue}
 				useIndexLookup = true
@@ -183,7 +183,7 @@ func (query *Query[T]) List() ([]T, error) {
 
 	if !useIndexLookup && query.committedTable != nil && (query.staging == nil || !query.staging.Cleared) {
 		for _, condition := range query.conditions {
-			if equalityCondition, found := condition.(*conditionImpl); found && strings.Contains(equalityCondition.desc, "==") {
+			if equalityCondition, found := condition.(*queryCondition); found && strings.Contains(equalityCondition.desc, "==") {
 				fieldName := equalityCondition.FieldName()
 				targetValue := equalityCondition.value
 
@@ -218,9 +218,9 @@ func (query *Query[T]) List() ([]T, error) {
 			}
 		} else {
 			if query.committedTable != nil {
-				tableStorage, err := query.database.getTableStorage(query.tableName)
-				if err != nil {
-					return nil, err
+				tableStorage, error := query.database.getTableStorage(query.tableName)
+				if error != nil {
+					return nil, error
 				}
 
 				for _, idValue := range targetIDs {
@@ -238,16 +238,16 @@ func (query *Query[T]) List() ([]T, error) {
 
 					recordPointer, exists := query.committedTable.RecordPointers[idValue]
 					if exists {
-						bytesValue, err := tableStorage.ReadRecord(recordPointer)
-						if err != nil {
-							return nil, err
+						bytesValue, error := tableStorage.ReadRecord(recordPointer)
+						if error != nil {
+							return nil, error
 						}
 
-						newRecordVal := reflect.New(query.committedTable.EntityType)
-						if err := Unmarshal(bytesValue, newRecordVal.Interface()); err != nil {
-							return nil, err
+						newRecordValue := reflect.New(query.committedTable.EntityType)
+						if error := Unmarshal(bytesValue, newRecordValue.Interface()); error != nil {
+							return nil, error
 						}
-						records = append(records, newRecordVal.Elem().Interface())
+						records = append(records, newRecordValue.Elem().Interface())
 					}
 				}
 			}
@@ -297,9 +297,9 @@ func (query *Query[T]) List() ([]T, error) {
 			}
 		} else {
 			if query.committedTable != nil {
-				tableStorage, err := query.database.getTableStorage(query.tableName)
-				if err != nil {
-					return nil, err
+				tableStorage, error := query.database.getTableStorage(query.tableName)
+				if error != nil {
+					return nil, error
 				}
 
 				for primaryKey, recordPointer := range query.committedTable.RecordPointers {
@@ -315,16 +315,16 @@ func (query *Query[T]) List() ([]T, error) {
 						}
 					}
 
-					bytesValue, err := tableStorage.ReadRecord(recordPointer)
-					if err != nil {
-						return nil, err
+					bytesValue, error := tableStorage.ReadRecord(recordPointer)
+					if error != nil {
+						return nil, error
 					}
 
-					newRecordVal := reflect.New(query.committedTable.EntityType)
-					if err := Unmarshal(bytesValue, newRecordVal.Interface()); err != nil {
-						return nil, err
+					newRecordValue := reflect.New(query.committedTable.EntityType)
+					if error := Unmarshal(bytesValue, newRecordValue.Interface()); error != nil {
+						return nil, error
 					}
-					records = append(records, newRecordVal.Elem().Interface())
+					records = append(records, newRecordValue.Elem().Interface())
 				}
 			}
 
@@ -401,9 +401,9 @@ func (query *Query[T]) List() ([]T, error) {
 
 func (query *Query[T]) FindFirst() (T, bool, error) {
 	var zero T
-	results, err := query.Limit(1).List()
-	if err != nil {
-		return zero, false, err
+	results, error := query.Limit(1).List()
+	if error != nil {
+		return zero, false, error
 	}
 	if len(results) == 0 {
 		return zero, false, nil

@@ -22,23 +22,23 @@ type TableStorage struct {
 
 func NewTableStorage(directory string, tableName string) (*TableStorage, error) {
 	if !isValidTableName(tableName) {
-		return nil, ErrInvalidTableName
+		return nil, InvalidTableNameError
 	}
 
-	if err := os.MkdirAll(directory, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create directory: %w", err)
+	if error := os.MkdirAll(directory, 0755); error != nil {
+		return nil, fmt.Errorf("failed to create directory: %w", error)
 	}
 
 	tablePath := filepath.Join(directory, tableName+".db")
-	file, err := os.OpenFile(tablePath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open table file %s: %w", tablePath, err)
+	file, error := os.OpenFile(tablePath, os.O_CREATE|os.O_RDWR, 0644)
+	if error != nil {
+		return nil, fmt.Errorf("failed to open table file %s: %w", tablePath, error)
 	}
 
-	fileInfo, err := file.Stat()
-	if err != nil {
+	fileInfo, error := file.Stat()
+	if error != nil {
 		file.Close()
-		return nil, fmt.Errorf("failed to stat table file %s: %w", tablePath, err)
+		return nil, fmt.Errorf("failed to stat table file %s: %w", tablePath, error)
 	}
 
 	return &TableStorage{
@@ -53,9 +53,9 @@ func (tableStorage *TableStorage) AppendRecord(bytesValue []byte) (RecordPointer
 	defer tableStorage.mu.Unlock()
 
 	offset := tableStorage.currentSize
-	written, err := tableStorage.file.WriteAt(bytesValue, offset)
-	if err != nil {
-		return RecordPointer{}, err
+	written, error := tableStorage.file.WriteAt(bytesValue, offset)
+	if error != nil {
+		return RecordPointer{}, error
 	}
 
 	recordPointer := RecordPointer{
@@ -89,9 +89,9 @@ func (tableStorage *TableStorage) AppendRecords(recordsSlice [][]byte) ([]Record
 	}
 
 	if len(buffer) > 0 {
-		_, err := tableStorage.file.WriteAt(buffer, tableStorage.currentSize)
-		if err != nil {
-			return nil, err
+		_, error := tableStorage.file.WriteAt(buffer, tableStorage.currentSize)
+		if error != nil {
+			return nil, error
 		}
 	}
 
@@ -101,12 +101,12 @@ func (tableStorage *TableStorage) AppendRecords(recordsSlice [][]byte) ([]Record
 
 func (tableStorage *TableStorage) ReadRecord(recordPointer RecordPointer) ([]byte, error) {
 	buffer := make([]byte, recordPointer.Size)
-	_, err := tableStorage.file.ReadAt(buffer, recordPointer.Offset)
-	if err != nil {
-		if err == io.EOF {
+	_, error := tableStorage.file.ReadAt(buffer, recordPointer.Offset)
+	if error != nil {
+		if error == io.EOF {
 			return nil, fmt.Errorf("unexpected EOF reading record at offset %d, size %d", recordPointer.Offset, recordPointer.Size)
 		}
-		return nil, err
+		return nil, error
 	}
 	return buffer, nil
 }
@@ -115,9 +115,9 @@ func (tableStorage *TableStorage) Close() error {
 	tableStorage.mu.Lock()
 	defer tableStorage.mu.Unlock()
 	if tableStorage.file != nil {
-		err := tableStorage.file.Close()
+		error := tableStorage.file.Close()
 		tableStorage.file = nil
-		return err
+		return error
 	}
 	return nil
 }
@@ -129,9 +129,9 @@ func (tableStorage *TableStorage) Compact(activePointers map[any]RecordPointer) 
 	compactPath := tableStorage.tablePath + ".compact"
 	_ = os.Remove(compactPath)
 
-	compactedFile, err := os.OpenFile(compactPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open compact file: %w", err)
+	compactedFile, error := os.OpenFile(compactPath, os.O_CREATE|os.O_RDWR, 0644)
+	if error != nil {
+		return fmt.Errorf("failed to open compact file: %w", error)
 	}
 	defer func() {
 		if compactedFile != nil {
@@ -146,13 +146,13 @@ func (tableStorage *TableStorage) Compact(activePointers map[any]RecordPointer) 
 	for key, oldRecordPointer := range activePointers {
 		// Read record
 		buffer := make([]byte, oldRecordPointer.Size)
-		if _, err := tableStorage.file.ReadAt(buffer, oldRecordPointer.Offset); err != nil {
-			return fmt.Errorf("compact failed to read record: %w", err)
+		if _, error := tableStorage.file.ReadAt(buffer, oldRecordPointer.Offset); error != nil {
+			return fmt.Errorf("compact failed to read record: %w", error)
 		}
 
 		// Write to compact file
-		if _, err := compactedFile.WriteAt(buffer, writeOffset); err != nil {
-			return fmt.Errorf("compact failed to write record: %w", err)
+		if _, error := compactedFile.WriteAt(buffer, writeOffset); error != nil {
+			return fmt.Errorf("compact failed to write record: %w", error)
 		}
 
 		newPointers[key] = RecordPointer{
@@ -163,27 +163,27 @@ func (tableStorage *TableStorage) Compact(activePointers map[any]RecordPointer) 
 	}
 
 	// Sync compact file
-	if err := compactedFile.Sync(); err != nil {
-		return fmt.Errorf("compact failed to sync: %w", err)
+	if error := compactedFile.Sync(); error != nil {
+		return fmt.Errorf("compact failed to sync: %w", error)
 	}
 
 	// Close files and swap
 	compactedFile.Close()
 	compactedFile = nil // prevent defer cleanup from deleting the swapped file
 
-	if err := tableStorage.file.Close(); err != nil {
-		return fmt.Errorf("failed to close table file for swap: %w", err)
+	if error := tableStorage.file.Close(); error != nil {
+		return fmt.Errorf("failed to close table file for swap: %w", error)
 	}
 	tableStorage.file = nil
 
-	if err := os.Rename(compactPath, tableStorage.tablePath); err != nil {
-		return fmt.Errorf("failed to swap table file: %w", err)
+	if error := os.Rename(compactPath, tableStorage.tablePath); error != nil {
+		return fmt.Errorf("failed to swap table file: %w", error)
 	}
 
 	// Reopen
-	file, err := os.OpenFile(tableStorage.tablePath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to reopen table file after swap: %w", err)
+	file, error := os.OpenFile(tableStorage.tablePath, os.O_CREATE|os.O_RDWR, 0644)
+	if error != nil {
+		return fmt.Errorf("failed to reopen table file after swap: %w", error)
 	}
 	tableStorage.file = file
 	tableStorage.currentSize = writeOffset
@@ -203,14 +203,14 @@ func (tableStorage *TableStorage) Reset() error {
 	tableStorage.mu.Lock()
 	defer tableStorage.mu.Unlock()
 	if tableStorage.file == nil {
-		return ErrClosed
+		return DatabaseClosedError
 	}
 
-	if err := tableStorage.file.Truncate(0); err != nil {
-		return err
+	if error := tableStorage.file.Truncate(0); error != nil {
+		return error
 	}
-	if _, err := tableStorage.file.Seek(0, io.SeekStart); err != nil {
-		return err
+	if _, error := tableStorage.file.Seek(0, io.SeekStart); error != nil {
+		return error
 	}
 	tableStorage.currentSize = 0
 	return tableStorage.file.Sync()

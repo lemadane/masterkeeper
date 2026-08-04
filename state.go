@@ -17,8 +17,8 @@ type IndexMetadata struct {
 
 type IndexState struct {
 	Metadata     IndexMetadata
-	UniqueMap    map[any]any   // maps indexVal -> primaryKey
-	SecondaryMap map[any][]any // maps indexVal -> slice of primaryKeys
+	UniqueMap    map[any]any   // maps indexValue -> primaryKey
+	SecondaryMap map[any][]any // maps indexValue -> slice of primaryKeys
 	SortedKeys   []any         // kept sorted if Ordered is true
 }
 
@@ -188,8 +188,8 @@ func (tableState *TableState) Copy() *TableState {
 		newPointers[key] = pointer
 	}
 	newIndexes := make(map[string]*IndexState)
-	for key, stateVal := range tableState.Indexes {
-		newIndexes[key] = stateVal.Copy()
+	for key, stateValue := range tableState.Indexes {
+		newIndexes[key] = stateValue.Copy()
 	}
 	return &TableState{
 		TableName:         tableState.TableName,
@@ -259,13 +259,13 @@ func NewDatabaseState(generation int64) *DatabaseState {
 	}
 }
 
-func (databaseState *DatabaseState) Copy(nextGen int64) *DatabaseState {
+func (databaseState *DatabaseState) Copy(nextGenerationeration int64) *DatabaseState {
 	newTables := make(map[string]*TableState)
-	for tableName, tableStateVal := range databaseState.Tables {
-		newTables[tableName] = tableStateVal.Copy()
+	for tableName, tableStateValue := range databaseState.Tables {
+		newTables[tableName] = tableStateValue.Copy()
 	}
 	return &DatabaseState{
-		Generation: nextGen,
+		Generation: nextGenerationeration,
 		Tables:     newTables,
 	}
 }

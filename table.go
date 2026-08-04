@@ -12,13 +12,13 @@ type Table[ID comparable, T any] struct {
 
 func GetTable[ID comparable, T any](database *Database, tableName string) (*Table[ID, T], error) {
 	if !isValidTableName(tableName) {
-		return nil, ErrInvalidTableName
+		return nil, InvalidTableNameError
 	}
 
 	var sample T
-	err := database.registerTableMetadata(tableName, reflect.TypeOf((*ID)(nil)).Elem(), reflect.TypeOf(sample))
-	if err != nil {
-		return nil, err
+	error := database.registerTableMetadata(tableName, reflect.TypeOf((*ID)(nil)).Elem(), reflect.TypeOf(sample))
+	if error != nil {
+		return nil, error
 	}
 	return &Table[ID, T]{
 		tableName: tableName,
@@ -34,7 +34,7 @@ func (table *Table[ID, T]) FindByID(transaction *Transaction, idValue ID) (T, bo
 	var zero T
 	if transaction != nil {
 		if !transaction.active {
-			return zero, false, ErrTransactionNotActive
+			return zero, false, NotActiveTransactionError
 		}
 
 		changeSet := transaction.changeSet.GetTableChanges(table.tableName)
@@ -62,9 +62,9 @@ func (table *Table[ID, T]) FindByID(transaction *Transaction, idValue ID) (T, bo
 		if tableState != nil {
 			recordPointer, exists := tableState.RecordPointers[idValue]
 			if exists {
-				record, err := table.readFromStorage(recordPointer)
-				if err != nil {
-					return zero, false, err
+				record, error := table.readFromStorage(recordPointer)
+				if error != nil {
+					return zero, false, error
 				}
 				return record, true, nil
 			}
@@ -77,9 +77,9 @@ func (table *Table[ID, T]) FindByID(transaction *Transaction, idValue ID) (T, bo
 		if tableState != nil {
 			recordPointer, exists := tableState.RecordPointers[idValue]
 			if exists {
-				record, err := table.readFromStorage(recordPointer)
-				if err != nil {
-					return zero, false, err
+				record, error := table.readFromStorage(recordPointer)
+				if error != nil {
+					return zero, false, error
 				}
 				return record, true, nil
 			}
@@ -90,19 +90,19 @@ func (table *Table[ID, T]) FindByID(transaction *Transaction, idValue ID) (T, bo
 
 func (table *Table[ID, T]) readFromStorage(recordPointer RecordPointer) (T, error) {
 	var zero T
-	tableStorage, err := table.database.getTableStorage(table.tableName)
-	if err != nil {
-		return zero, err
+	tableStorage, error := table.database.getTableStorage(table.tableName)
+	if error != nil {
+		return zero, error
 	}
-	bytesValue, err := tableStorage.ReadRecord(recordPointer)
-	if err != nil {
-		return zero, err
+	bytesValue, error := tableStorage.ReadRecord(recordPointer)
+	if error != nil {
+		return zero, error
 	}
 
 	targetValue := reflect.New(reflect.TypeOf(zero))
-	err = Unmarshal(bytesValue, targetValue.Interface())
-	if err != nil {
-		return zero, err
+	error = Unmarshal(bytesValue, targetValue.Interface())
+	if error != nil {
+		return zero, error
 	}
 	return targetValue.Elem().Interface().(T), nil
 }
@@ -111,21 +111,21 @@ func (table *Table[ID, T]) Insert(transaction *Transaction, record T) error {
 	if transaction != nil {
 		return table.insert(transaction, record)
 	}
-	return table.database.Transaction(func(txVal *Transaction) error {
-		return table.insert(txVal, record)
+	return table.database.Transaction(func(transactionValue *Transaction) error {
+		return table.insert(transactionValue, record)
 	})
 }
 
 func (table *Table[ID, T]) insert(transaction *Transaction, record T) error {
 	if !transaction.active {
-		return ErrTransactionNotActive
+		return NotActiveTransactionError
 	}
 
-	primaryKeyVal := getPrimaryKey(record)
-	if primaryKeyVal == nil {
+	primaryKeyValue := getPrimaryKey(record)
+	if primaryKeyValue == nil {
 		return fmt.Errorf("primary key ID cannot be nil")
 	}
-	primaryKey := primaryKeyVal.(ID)
+	primaryKey := primaryKeyValue.(ID)
 
 	changeSet := transaction.changeSet.GetTableChanges(table.tableName)
 
@@ -168,21 +168,21 @@ func (table *Table[ID, T]) Update(transaction *Transaction, record T) error {
 	if transaction != nil {
 		return table.update(transaction, record)
 	}
-	return table.database.Transaction(func(txVal *Transaction) error {
-		return table.update(txVal, record)
+	return table.database.Transaction(func(transactionValue *Transaction) error {
+		return table.update(transactionValue, record)
 	})
 }
 
 func (table *Table[ID, T]) update(transaction *Transaction, record T) error {
 	if !transaction.active {
-		return ErrTransactionNotActive
+		return NotActiveTransactionError
 	}
 
-	primaryKeyVal := getPrimaryKey(record)
-	if primaryKeyVal == nil {
+	primaryKeyValue := getPrimaryKey(record)
+	if primaryKeyValue == nil {
 		return fmt.Errorf("primary key ID cannot be nil")
 	}
-	primaryKey := primaryKeyVal.(ID)
+	primaryKey := primaryKeyValue.(ID)
 
 	changeSet := transaction.changeSet.GetTableChanges(table.tableName)
 
@@ -201,9 +201,9 @@ func (table *Table[ID, T]) update(transaction *Transaction, record T) error {
 			if tableState != nil {
 				recordPointer, exists := tableState.RecordPointers[primaryKey]
 				if exists {
-					rRecord, err := table.readFromStorage(recordPointer)
-					if err != nil {
-						return err
+					rRecord, error := table.readFromStorage(recordPointer)
+					if error != nil {
+						return error
 					}
 					oldRecord = rRecord
 					foundRecord = true
@@ -244,17 +244,17 @@ func (table *Table[ID, T]) Upsert(transaction *Transaction, record T) error {
 	if transaction != nil {
 		return table.upsert(transaction, record)
 	}
-	return table.database.Transaction(func(txVal *Transaction) error {
-		return table.upsert(txVal, record)
+	return table.database.Transaction(func(transactionValue *Transaction) error {
+		return table.upsert(transactionValue, record)
 	})
 }
 
 func (table *Table[ID, T]) upsert(transaction *Transaction, record T) error {
-	primaryKeyVal := getPrimaryKey(record)
-	if primaryKeyVal == nil {
+	primaryKeyValue := getPrimaryKey(record)
+	if primaryKeyValue == nil {
 		return fmt.Errorf("primary key ID cannot be nil")
 	}
-	primaryKey := primaryKeyVal.(ID)
+	primaryKey := primaryKeyValue.(ID)
 
 	changeSet := transaction.changeSet.GetTableChanges(table.tableName)
 	exists := false
@@ -285,17 +285,17 @@ func (table *Table[ID, T]) DeleteByID(transaction *Transaction, idValue ID) (boo
 		return table.deleteByID(transaction, idValue)
 	}
 	var deleted bool
-	err := table.database.Transaction(func(txVal *Transaction) error {
-		var deleteErr error
-		deleted, deleteErr = table.deleteByID(txVal, idValue)
-		return deleteErr
+	txError := table.database.Transaction(func(transactionValue *Transaction) error {
+		var deleteError error
+		deleted, deleteError = table.deleteByID(transactionValue, idValue)
+		return deleteError
 	})
-	return deleted, err
+	return deleted, txError
 }
 
 func (table *Table[ID, T]) deleteByID(transaction *Transaction, idValue ID) (bool, error) {
 	if !transaction.active {
-		return false, ErrTransactionNotActive
+		return false, NotActiveTransactionError
 	}
 
 	changeSet := transaction.changeSet.GetTableChanges(table.tableName)
@@ -315,9 +315,9 @@ func (table *Table[ID, T]) deleteByID(transaction *Transaction, idValue ID) (boo
 			if tableState != nil {
 				recordPointer, exists := tableState.RecordPointers[idValue]
 				if exists {
-					rRecord, err := table.readFromStorage(recordPointer)
-					if err != nil {
-						return false, err
+					rRecord, error := table.readFromStorage(recordPointer)
+					if error != nil {
+						return false, error
 					}
 					oldRecord = rRecord
 					foundRecord = true
@@ -355,14 +355,14 @@ func (table *Table[ID, T]) Clear(transaction *Transaction) error {
 	if transaction != nil {
 		return table.clear(transaction)
 	}
-	return table.database.Transaction(func(txVal *Transaction) error {
-		return table.clear(txVal)
+	return table.database.Transaction(func(transactionValue *Transaction) error {
+		return table.clear(transactionValue)
 	})
 }
 
 func (table *Table[ID, T]) clear(transaction *Transaction) error {
 	if !transaction.active {
-		return ErrTransactionNotActive
+		return NotActiveTransactionError
 	}
 
 	changeSet := transaction.changeSet.GetTableChanges(table.tableName)

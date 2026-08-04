@@ -33,8 +33,8 @@ func Marshal(value any) ([]byte, error) {
 	}
 
 	var buffer bytes.Buffer
-	if err := writeStructFields(&buffer, reflectValue); err != nil {
-		return nil, err
+	if error := writeStructFields(&buffer, reflectValue); error != nil {
+		return nil, error
 	}
 	return buffer.Bytes(), nil
 }
@@ -55,19 +55,19 @@ func Unmarshal(data []byte, targetPointer any) error {
 
 	reader := bytes.NewReader(data)
 	var count int32
-	if err := binary.Read(reader, binary.BigEndian, &count); err != nil {
-		return err
+	if error := binary.Read(reader, binary.BigEndian, &count); error != nil {
+		return error
 	}
 
 	fields := make(map[string]any)
 	for index := 0; index < int(count); index++ {
-		name, err := readString(reader)
-		if err != nil {
-			return err
+		name, error := readString(reader)
+		if error != nil {
+			return error
 		}
-		fieldValue, err := readValue(reader)
-		if err != nil {
-			return err
+		fieldValue, error := readValue(reader)
+		if error != nil {
+			return error
 		}
 		fields[name] = fieldValue
 	}
@@ -81,9 +81,9 @@ func Unmarshal(data []byte, targetPointer any) error {
 	for keyName, fieldValue := range fields {
 		fieldInfo, found := metadata.fields[strings.ToLower(keyName)]
 		if found {
-			castReflectValue, err := castValue(fieldValue, baseReflectValue.Field(fieldInfo.index).Type())
-			if err != nil {
-				return fmt.Errorf("failed to cast field %s: %w", fieldInfo.name, err)
+			castReflectValue, error := castValue(fieldValue, baseReflectValue.Field(fieldInfo.index).Type())
+			if error != nil {
+				return fmt.Errorf("failed to cast field %s: %w", fieldInfo.name, error)
 			}
 			baseReflectValue.Field(fieldInfo.index).Set(castReflectValue)
 		}
@@ -93,21 +93,21 @@ func Unmarshal(data []byte, targetPointer any) error {
 
 func writeString(writer io.Writer, strValue string) error {
 	byteSlice := []byte(strValue)
-	if err := binary.Write(writer, binary.BigEndian, int32(len(byteSlice))); err != nil {
-		return err
+	if error := binary.Write(writer, binary.BigEndian, int32(len(byteSlice))); error != nil {
+		return error
 	}
-	_, err := writer.Write(byteSlice)
-	return err
+	_, error := writer.Write(byteSlice)
+	return error
 }
 
 func readString(reader io.Reader) (string, error) {
 	var length int32
-	if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
-		return "", err
+	if error := binary.Read(reader, binary.BigEndian, &length); error != nil {
+		return "", error
 	}
 	byteSlice := make([]byte, length)
-	if _, err := io.ReadFull(reader, byteSlice); err != nil {
-		return "", err
+	if _, error := io.ReadFull(reader, byteSlice); error != nil {
+		return "", error
 	}
 	return string(byteSlice), nil
 }
@@ -118,16 +118,16 @@ func writeStructFields(writer io.Writer, reflectValue reflect.Value) error {
 		return errors.New("failed to get metadata")
 	}
 
-	if err := binary.Write(writer, binary.BigEndian, int32(len(metadata.marshalFields))); err != nil {
-		return err
+	if error := binary.Write(writer, binary.BigEndian, int32(len(metadata.marshalFields))); error != nil {
+		return error
 	}
 
 	for _, fieldInfo := range metadata.marshalFields {
-		if err := writeString(writer, fieldInfo.name); err != nil {
-			return err
+		if error := writeString(writer, fieldInfo.name); error != nil {
+			return error
 		}
-		if err := writeValue(writer, reflectValue.Field(fieldInfo.index)); err != nil {
-			return err
+		if error := writeValue(writer, reflectValue.Field(fieldInfo.index)); error != nil {
+			return error
 		}
 	}
 	return nil
@@ -147,79 +147,79 @@ func writeValue(writer io.Writer, reflectValue reflect.Value) error {
 
 	switch reflectValue.Kind() {
 	case reflect.String:
-		if err := binary.Write(writer, binary.BigEndian, byte(1)); err != nil { // TAG_STRING
-			return err
+		if error := binary.Write(writer, binary.BigEndian, byte(1)); error != nil { // TAG_STRING
+			return error
 		}
 		return writeString(writer, reflectValue.String())
 
 	case reflect.Slice:
 		if reflectValue.Type().Elem().Kind() == reflect.Uint8 {
-			if err := binary.Write(writer, binary.BigEndian, byte(2)); err != nil { // TAG_BYTES
-				return err
+			if error := binary.Write(writer, binary.BigEndian, byte(2)); error != nil { // TAG_BYTES
+				return error
 			}
 			byteSlice := reflectValue.Bytes()
-			if err := binary.Write(writer, binary.BigEndian, int32(len(byteSlice))); err != nil {
-				return err
+			if error := binary.Write(writer, binary.BigEndian, int32(len(byteSlice))); error != nil {
+				return error
 			}
-			_, err := writer.Write(byteSlice)
-			return err
+			_, error := writer.Write(byteSlice)
+			return error
 		}
 		return errors.New("unsupported slice type in codec")
 
 	case reflect.Struct:
 		if reflectValue.Type().String() == "time.Time" {
-			timeVal := reflectValue.Interface().(time.Time)
-			if err := binary.Write(writer, binary.BigEndian, byte(3)); err != nil { // TAG_TIME
-				return err
+			timeValue := reflectValue.Interface().(time.Time)
+			if error := binary.Write(writer, binary.BigEndian, byte(3)); error != nil { // TAG_TIME
+				return error
 			}
-			if err := binary.Write(writer, binary.BigEndian, timeVal.Unix()); err != nil {
-				return err
+			if error := binary.Write(writer, binary.BigEndian, timeValue.Unix()); error != nil {
+				return error
 			}
-			return binary.Write(writer, binary.BigEndian, int32(timeVal.Nanosecond()))
+			return binary.Write(writer, binary.BigEndian, int32(timeValue.Nanosecond()))
 		}
 
-		if err := binary.Write(writer, binary.BigEndian, byte(9)); err != nil { // TAG_STRUCT
-			return err
+		if error := binary.Write(writer, binary.BigEndian, byte(9)); error != nil { // TAG_STRUCT
+			return error
 		}
 		structName := reflectValue.Type().String()
-		if err := writeString(writer, structName); err != nil {
-			return err
+		if error := writeString(writer, structName); error != nil {
+			return error
 		}
 		return writeStructFields(writer, reflectValue)
 
 	case reflect.Int:
-		if err := binary.Write(writer, binary.BigEndian, byte(5)); err != nil {
-			return err
+		if error := binary.Write(writer, binary.BigEndian, byte(5)); error != nil {
+			return error
 		}
 		return binary.Write(writer, binary.BigEndian, reflectValue.Int())
 
 	case reflect.Int8, reflect.Int16, reflect.Int32:
-		if err := binary.Write(writer, binary.BigEndian, byte(4)); err != nil {
-			return err
+		if error := binary.Write(writer, binary.BigEndian, byte(4)); error != nil {
+			return error
 		}
 		return binary.Write(writer, binary.BigEndian, int32(reflectValue.Int()))
 
 	case reflect.Int64:
-		if err := binary.Write(writer, binary.BigEndian, byte(5)); err != nil {
-			return err
+		if error := binary.Write(writer, binary.BigEndian, byte(5)); error != nil {
+			return error
 		}
 		return binary.Write(writer, binary.BigEndian, reflectValue.Int())
 
 	case reflect.Float32, reflect.Float64:
-		if err := binary.Write(writer, binary.BigEndian, byte(6)); err != nil { // TAG_FLOAT64
-			return err
+		if error := binary.Write(writer, binary.BigEndian, byte(6)); error != nil { // TAG_FLOAT64
+			return error
 		}
 		return binary.Write(writer, binary.BigEndian, reflectValue.Float())
 
 	case reflect.Bool:
-		if err := binary.Write(writer, binary.BigEndian, byte(7)); err != nil { // TAG_BOOL
-			return err
+		if error := binary.Write(writer, binary.BigEndian, byte(7)); error != nil { // TAG_BOOL
+			return error
 		}
-		var byteVal byte = 0
+		var byteValue byte = 0
 		if reflectValue.Bool() {
-			byteVal = 1
+			byteValue = 1
 		}
-		return binary.Write(writer, binary.BigEndian, byteVal)
+		return binary.Write(writer, binary.BigEndian, byteValue)
 
 	default:
 		return fmt.Errorf("unsupported type %s in codec", reflectValue.Type().String())
@@ -228,8 +228,8 @@ func writeValue(writer io.Writer, reflectValue reflect.Value) error {
 
 func readValue(reader io.Reader) (any, error) {
 	var tag byte
-	if err := binary.Read(reader, binary.BigEndian, &tag); err != nil {
-		return nil, err
+	if error := binary.Read(reader, binary.BigEndian, &tag); error != nil {
+		return nil, error
 	}
 
 	switch tag {
@@ -239,66 +239,66 @@ func readValue(reader io.Reader) (any, error) {
 		return readString(reader)
 	case 2: // TAG_BYTES
 		var length int32
-		if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
-			return nil, err
+		if error := binary.Read(reader, binary.BigEndian, &length); error != nil {
+			return nil, error
 		}
 		byteSlice := make([]byte, length)
-		if _, err := io.ReadFull(reader, byteSlice); err != nil {
-			return nil, err
+		if _, error := io.ReadFull(reader, byteSlice); error != nil {
+			return nil, error
 		}
 		return byteSlice, nil
 	case 3: // TAG_TIME
 		var seconds int64
 		var nanoseconds int32
-		if err := binary.Read(reader, binary.BigEndian, &seconds); err != nil {
-			return nil, err
+		if error := binary.Read(reader, binary.BigEndian, &seconds); error != nil {
+			return nil, error
 		}
-		if err := binary.Read(reader, binary.BigEndian, &nanoseconds); err != nil {
-			return nil, err
+		if error := binary.Read(reader, binary.BigEndian, &nanoseconds); error != nil {
+			return nil, error
 		}
 		return time.Unix(seconds, int64(nanoseconds)), nil
 	case 4: // TAG_INT32
-		var intVal int32
-		if err := binary.Read(reader, binary.BigEndian, &intVal); err != nil {
-			return nil, err
+		var integerValue int32
+		if error := binary.Read(reader, binary.BigEndian, &integerValue); error != nil {
+			return nil, error
 		}
-		return intVal, nil
+		return integerValue, nil
 	case 5: // TAG_INT64
-		var intVal int64
-		if err := binary.Read(reader, binary.BigEndian, &intVal); err != nil {
-			return nil, err
+		var integerValue int64
+		if error := binary.Read(reader, binary.BigEndian, &integerValue); error != nil {
+			return nil, error
 		}
-		return intVal, nil
+		return integerValue, nil
 	case 6: // TAG_FLOAT64
-		var floatVal float64
-		if err := binary.Read(reader, binary.BigEndian, &floatVal); err != nil {
-			return nil, err
+		var floatValue float64
+		if error := binary.Read(reader, binary.BigEndian, &floatValue); error != nil {
+			return nil, error
 		}
-		return floatVal, nil
+		return floatValue, nil
 	case 7: // TAG_BOOL
-		var byteVal byte
-		if err := binary.Read(reader, binary.BigEndian, &byteVal); err != nil {
-			return nil, err
+		var byteValue byte
+		if error := binary.Read(reader, binary.BigEndian, &byteValue); error != nil {
+			return nil, error
 		}
-		return byteVal != 0, nil
+		return byteValue != 0, nil
 	case 9: // TAG_STRUCT
-		structName, err := readString(reader)
-		if err != nil {
-			return nil, err
+		structName, error := readString(reader)
+		if error != nil {
+			return nil, error
 		}
 		var count int32
-		if err := binary.Read(reader, binary.BigEndian, &count); err != nil {
-			return nil, err
+		if error := binary.Read(reader, binary.BigEndian, &count); error != nil {
+			return nil, error
 		}
 		fields := make(map[string]any)
 		for index := 0; index < int(count); index++ {
-			name, err := readString(reader)
-			if err != nil {
-				return nil, err
+			name, error := readString(reader)
+			if error != nil {
+				return nil, error
 			}
-			fieldValue, err := readValue(reader)
-			if err != nil {
-				return nil, err
+			fieldValue, error := readValue(reader)
+			if error != nil {
+				return nil, error
 			}
 			fields[name] = fieldValue
 		}
@@ -365,82 +365,82 @@ func castValue(value any, targetType reflect.Type) (reflect.Value, error) {
 		for keyName, fieldValue := range placeholder.Fields {
 			fieldInfo, foundField := metadata.fields[strings.ToLower(keyName)]
 			if foundField {
-				castReflectValue, err := castValue(fieldValue, baseType.Field(fieldInfo.index).Type)
-				if err != nil {
-					return reflect.Value{}, err
+				castReflectValue, error := castValue(fieldValue, baseType.Field(fieldInfo.index).Type)
+				if error != nil {
+					return reflect.Value{}, error
 				}
 				newStruct.Field(fieldInfo.index).Set(castReflectValue)
 			}
 		}
-		return returnVal(newStruct, isPointer), nil
+		return returnValue(newStruct, isPointer), nil
 	}
 
 	switch baseType.Kind() {
 	case reflect.String:
 		stringValue := ""
-		if strVal, found := value.(string); found {
-			stringValue = strVal
+		if val, found := value.(string); found {
+			stringValue = val
 		} else {
 			stringValue = fmt.Sprintf("%v", value)
 		}
-		return returnVal(reflect.ValueOf(stringValue), isPointer), nil
+		return returnValue(reflect.ValueOf(stringValue), isPointer), nil
 
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		result, err := castSignedInteger(value, baseType)
-		if err != nil {
-			return reflect.Value{}, err
+		result, error := castSignedInteger(value, baseType)
+		if error != nil {
+			return reflect.Value{}, error
 		}
-		return returnVal(result, isPointer), nil
+		return returnValue(result, isPointer), nil
 
 	case reflect.Float64:
 		var floatValue float64
-		if floatVal, found := value.(float64); found {
-			floatValue = floatVal
-		} else if float32Val, found := value.(float32); found {
-			floatValue = float64(float32Val)
-		} else if int32Val, found := value.(int32); found {
-			floatValue = float64(int32Val)
-		} else if int64Val, found := value.(int64); found {
-			floatValue = float64(int64Val)
-		} else if intVal, found := value.(int); found {
-			floatValue = float64(intVal)
+		if val, found := value.(float64); found {
+			floatValue = val
+		} else if float32Value, found := value.(float32); found {
+			floatValue = float64(float32Value)
+		} else if int32Value, found := value.(int32); found {
+			floatValue = float64(int32Value)
+		} else if int64Value, found := value.(int64); found {
+			floatValue = float64(int64Value)
+		} else if integerValue, found := value.(int); found {
+			floatValue = float64(integerValue)
 		}
-		return returnVal(reflect.ValueOf(floatValue), isPointer), nil
+		return returnValue(reflect.ValueOf(floatValue), isPointer), nil
 
 	case reflect.Bool:
 		var boolValue bool
-		if boolVal, found := value.(bool); found {
-			boolValue = boolVal
+		if booleanValue, found := value.(bool); found {
+			boolValue = booleanValue
 		}
-		return returnVal(reflect.ValueOf(boolValue), isPointer), nil
+		return returnValue(reflect.ValueOf(boolValue), isPointer), nil
 
 	case reflect.Slice:
 		if baseType.Elem().Kind() == reflect.Uint8 {
 			if byteSlice, found := value.([]byte); found {
-				return returnVal(reflect.ValueOf(byteSlice), isPointer), nil
+				return returnValue(reflect.ValueOf(byteSlice), isPointer), nil
 			}
 		}
 
 	case reflect.Struct:
 		if baseType.String() == "time.Time" {
-			if timeVal, found := value.(time.Time); found {
-				return returnVal(reflect.ValueOf(timeVal), isPointer), nil
+			if timeValue, found := value.(time.Time); found {
+				return returnValue(reflect.ValueOf(timeValue), isPointer), nil
 			}
 		}
 	}
 
 	if reflectValue.Type().AssignableTo(baseType) {
-		return returnVal(reflectValue, isPointer), nil
+		return returnValue(reflectValue, isPointer), nil
 	}
 
 	if reflectValue.Type().ConvertibleTo(baseType) {
-		return returnVal(reflectValue.Convert(baseType), isPointer), nil
+		return returnValue(reflectValue.Convert(baseType), isPointer), nil
 	}
 
 	return reflect.Value{}, fmt.Errorf("cannot cast %T to %s", value, targetType.String())
 }
 
-func returnVal(value reflect.Value, isPointer bool) reflect.Value {
+func returnValue(value reflect.Value, isPointer bool) reflect.Value {
 	if isPointer {
 		pointerValue := reflect.New(value.Type())
 		pointerValue.Elem().Set(value)

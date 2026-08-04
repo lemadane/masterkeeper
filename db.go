@@ -74,9 +74,9 @@ func Open(directory string, options Options) (*Database, error) {
 	}
 
 	// 1. Read Snapshot
-	snapshotState, err := readSnapshot(directory, database)
-	if err != nil {
-		return nil, fmt.Errorf("database snapshot read failed: %w", err)
+	snapshotState, error := readSnapshot(directory, database)
+	if error != nil {
+		return nil, fmt.Errorf("database snapshot read failed: %w", error)
 	}
 
 	if snapshotState == nil {
@@ -84,33 +84,33 @@ func Open(directory string, options Options) (*Database, error) {
 	}
 
 	// 2. Open WAL Manager
-	walManagerVal, err := NewWalManager(directory, options.Durability, tableStorageResolver)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open WAL: %w", err)
+	walManagerValue, error := NewWalManager(directory, options.Durability, tableStorageResolver)
+	if error != nil {
+		return nil, fmt.Errorf("failed to open WAL: %w", error)
 	}
-	database.walManager = walManagerVal
+	database.walManager = walManagerValue
 
 	// 3. Read and Replay WAL
-	walRecords, err := walManagerVal.ReadAllRecords()
-	if err != nil {
-		walManagerVal.Close()
-		return nil, fmt.Errorf("failed to read WAL records: %w", err)
+	walRecords, error := walManagerValue.ReadAllRecords()
+	if error != nil {
+		walManagerValue.Close()
+		return nil, fmt.Errorf("failed to read WAL records: %w", error)
 	}
 
-	recoveredState, err := database.recover(snapshotState, walRecords)
-	if err != nil {
-		walManagerVal.Close()
-		return nil, fmt.Errorf("database recovery failed: %w", err)
+	recoveredState, error := database.recover(snapshotState, walRecords)
+	if error != nil {
+		walManagerValue.Close()
+		return nil, fmt.Errorf("database recovery failed: %w", error)
 	}
 
 	database.committedState.Store(recoveredState)
 
 	// Register metadata for recovered tables
-	for _, tableStateVal := range recoveredState.Tables {
-		database.tableMetadataMap.Store(tableStateVal.TableName, TableMetadata{
-			TableName: tableStateVal.TableName,
-			IdType:    tableStateVal.IdType,
-			Type:      tableStateVal.EntityType,
+	for _, tableStateValue := range recoveredState.Tables {
+		database.tableMetadataMap.Store(tableStateValue.TableName, TableMetadata{
+			TableName: tableStateValue.TableName,
+			IdType:    tableStateValue.IdType,
+			Type:      tableStateValue.EntityType,
 		})
 	}
 
@@ -127,25 +127,25 @@ func (database *Database) currentGeneration() int64 {
 
 func (database *Database) getTableStorage(tableName string) (*TableStorage, error) {
 	if database.closed {
-		return nil, ErrClosed
+		return nil, DatabaseClosedError
 	}
 
 	if val, ok := database.tableStorageMap.Load(tableName); ok {
 		return val.(*TableStorage), nil
 	}
 
-	tableStorageVal, err := NewTableStorage(database.directory, tableName)
-	if err != nil {
-		return nil, err
+	tableStorageValue, error := NewTableStorage(database.directory, tableName)
+	if error != nil {
+		return nil, error
 	}
 
-	actual, loaded := database.tableStorageMap.LoadOrStore(tableName, tableStorageVal)
+	actual, loaded := database.tableStorageMap.LoadOrStore(tableName, tableStorageValue)
 	if loaded {
-		tableStorageVal.Close()
+		tableStorageValue.Close()
 		return actual.(*TableStorage), nil
 	}
 
-	return tableStorageVal, nil
+	return tableStorageValue, nil
 }
 
 func (database *Database) releaseWriterLock() {
@@ -158,14 +158,14 @@ func (database *Database) publish(nextState *DatabaseState) {
 
 func (database *Database) registerTableMetadata(tableName string, idType reflect.Type, entityType reflect.Type) error {
 	if !isValidTableName(tableName) {
-		return ErrInvalidTableName
+		return InvalidTableNameError
 	}
 
 	if val, found := database.tableMetadataMap.Load(tableName); found {
 		meta := val.(TableMetadata)
 		if meta.IdType != idType || meta.Type != entityType {
 			return fmt.Errorf("%w: expected ID %s and entity %s, got ID %s and entity %s",
-				ErrIncompatibleTypes, meta.IdType.String(), meta.Type.String(), idType.String(), entityType.String())
+				IncompatibleTypesError, meta.IdType.String(), meta.Type.String(), idType.String(), entityType.String())
 		}
 		return nil
 	}
@@ -174,7 +174,7 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 	defer database.writeLock.Unlock()
 
 	if database.closed {
-		return ErrClosed
+		return DatabaseClosedError
 	}
 
 	// Double check
@@ -182,7 +182,7 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 		meta := val.(TableMetadata)
 		if meta.IdType != idType || meta.Type != entityType {
 			return fmt.Errorf("%w: expected ID %s and entity %s, got ID %s and entity %s",
-				ErrIncompatibleTypes, meta.IdType.String(), meta.Type.String(), idType.String(), entityType.String())
+				IncompatibleTypesError, meta.IdType.String(), meta.Type.String(), idType.String(), entityType.String())
 		}
 		return nil
 	}
@@ -206,7 +206,7 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 		}
 	}
 
-	nextGen := database.currentGeneration() + 1
+	nextGenerationeration := database.currentGeneration() + 1
 	var walRecords []WalRecord
 
 	// CREATE TABLE WAL record
@@ -217,23 +217,23 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 	walRecords = append(walRecords, WalRecord{
 		Type:          OpCreateTable,
 		TransactionID: database.databaseID,
-		Generation:    nextGen,
+		Generation:    nextGenerationeration,
 		Payload:       buffer.Bytes(),
 	})
 
 	// CREATE INDEX WAL records
 	for _, indexMetadata := range indexMetadataList {
-		var idxBuf bytes.Buffer
-		_ = writeString(&idxBuf, tableName)
-		_ = writeString(&idxBuf, indexMetadata.IndexName)
-		_ = binary.Write(&idxBuf, binary.BigEndian, indexMetadata.Unique)
-		_ = binary.Write(&idxBuf, binary.BigEndian, indexMetadata.Ordered)
+		var indexBuf bytes.Buffer
+		_ = writeString(&indexBuf, tableName)
+		_ = writeString(&indexBuf, indexMetadata.IndexName)
+		_ = binary.Write(&indexBuf, binary.BigEndian, indexMetadata.Unique)
+		_ = binary.Write(&indexBuf, binary.BigEndian, indexMetadata.Ordered)
 
 		walRecords = append(walRecords, WalRecord{
 			Type:          OpCreateIndex,
 			TransactionID: database.databaseID,
-			Generation:    nextGen,
-			Payload:       idxBuf.Bytes(),
+			Generation:    nextGenerationeration,
+			Payload:       indexBuf.Bytes(),
 		})
 	}
 
@@ -241,20 +241,20 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 	doneChan := make(chan WriteResult, 1)
 	database.walManager.Submit(&WriteTask{
 		TxID:         database.databaseID,
-		Generation:   nextGen,
+		Generation:   nextGenerationeration,
 		WalRecords:   walRecords,
 		TableAppends: nil,
 		Done:         doneChan,
 	})
 
 	res := <-doneChan
-	if res.Err != nil {
-		return fmt.Errorf("schema modification failed: %w", res.Err)
+	if res.Error != nil {
+		return fmt.Errorf("schema modification failed: %w", res.Error)
 	}
 
 	// Publish state update
 	newTableState := NewTableState(tableName, idType, entityType, indexMetadataList)
-	nextState := database.getCommittedState().Copy(nextGen)
+	nextState := database.getCommittedState().Copy(nextGenerationeration)
 	nextState.Tables[tableName] = newTableState
 	database.publish(nextState)
 
@@ -285,11 +285,11 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 	defer database.writeLock.Unlock()
 
 	if database.closed {
-		return false, ErrClosed
+		return false, DatabaseClosedError
 	}
 
 	if !isValidTableName(tableName) {
-		return false, ErrInvalidTableName
+		return false, InvalidTableNameError
 	}
 
 	committed := database.getCommittedState()
@@ -297,19 +297,19 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 		return false, nil
 	}
 
-	nextGen := database.currentGeneration() + 1
+	nextGenerationeration := database.currentGeneration() + 1
 	var buffer bytes.Buffer
 	_ = writeString(&buffer, tableName)
 
 	doneChan := make(chan WriteResult, 1)
 	database.walManager.Submit(&WriteTask{
 		TxID:       database.databaseID,
-		Generation: nextGen,
+		Generation: nextGenerationeration,
 		WalRecords: []WalRecord{
 			{
 				Type:          OpDropTable,
 				TransactionID: database.databaseID,
-				Generation:    nextGen,
+				Generation:    nextGenerationeration,
 				Payload:       buffer.Bytes(),
 			},
 		},
@@ -318,11 +318,11 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 	})
 
 	res := <-doneChan
-	if res.Err != nil {
-		return false, res.Err
+	if res.Error != nil {
+		return false, res.Error
 	}
 
-	nextState := committed.Copy(nextGen)
+	nextState := committed.Copy(nextGenerationeration)
 	delete(nextState.Tables, tableName)
 	database.publish(nextState)
 
@@ -330,8 +330,8 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 
 	// Close and delete table file
 	if val, ok := database.tableStorageMap.LoadAndDelete(tableName); ok {
-		tableStorageVal := val.(*TableStorage)
-		tableStorageVal.Close()
+		tableStorageValue := val.(*TableStorage)
+		tableStorageValue.Close()
 	}
 	_ = os.Remove(filepath.Join(database.directory, tableName+".db"))
 
@@ -342,10 +342,10 @@ func (database *Database) Transaction(callback func(transaction *Transaction) er
 	database.writeLock.Lock()
 	if database.closed {
 		database.writeLock.Unlock()
-		return ErrClosed
+		return DatabaseClosedError
 	}
-	txID := rand.Int63()
-	transaction := NewTransaction(txID, database, database.getCommittedState())
+	transactionID := rand.Int63()
+	transaction := NewTransaction(transactionID, database, database.getCommittedState())
 
 	defer func() {
 		if transaction.IsActive() {
@@ -353,13 +353,13 @@ func (database *Database) Transaction(callback func(transaction *Transaction) er
 		}
 	}()
 
-	err := callback(transaction)
-	if err != nil {
+	error := callback(transaction)
+	if error != nil {
 		// Rollback on callback error
 		if transaction.IsActive() {
 			_ = transaction.Rollback()
 		}
-		return err
+		return error
 	}
 
 	if transaction.IsActive() {
@@ -379,8 +379,8 @@ func (database *Database) Close() error {
 	database.closed = true
 
 	database.tableStorageMap.Range(func(key, value any) bool {
-		tableStorageVal := value.(*TableStorage)
-		tableStorageVal.Close()
+		tableStorageValue := value.(*TableStorage)
+		tableStorageValue.Close()
 		return true
 	})
 
@@ -392,29 +392,29 @@ func (database *Database) Compact() error {
 	defer database.writeLock.Unlock()
 
 	if database.closed {
-		return ErrClosed
+		return DatabaseClosedError
 	}
 
 	committed := database.getCommittedState()
 	// 1. Write snapshot
-	if err := writeSnapshot(database.directory, committed, database); err != nil {
-		return fmt.Errorf("SNAPSHOT failed during compaction: %w", err)
+	if error := writeSnapshot(database.directory, committed, database); error != nil {
+		return fmt.Errorf("SNAPSHOT failed during compaction: %w", error)
 	}
 
 	// 2. Compact table files
-	for tableName, tableStateVal := range committed.Tables {
-		tableStorageVal, err := database.getTableStorage(tableName)
-		if err != nil {
-			return err
+	for tableName, tableStateValue := range committed.Tables {
+		tableStorageValue, error := database.getTableStorage(tableName)
+		if error != nil {
+			return error
 		}
-		if err := tableStorageVal.Compact(tableStateVal.RecordPointers); err != nil {
-			return fmt.Errorf("compaction of table %s failed: %w", tableName, err)
+		if error := tableStorageValue.Compact(tableStateValue.RecordPointers); error != nil {
+			return fmt.Errorf("compaction of table %s failed: %w", tableName, error)
 		}
 	}
 
 	// 3. Truncate WAL log
-	if err := database.walManager.Truncate(); err != nil {
-		return fmt.Errorf("WAL truncate failed: %w", err)
+	if error := database.walManager.Truncate(); error != nil {
+		return fmt.Errorf("WAL truncate failed: %w", error)
 	}
 
 	return nil
@@ -428,31 +428,31 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 		return NewDatabaseState(0), nil
 	}
 
-	txGroups := make(map[int64][]WalRecord)
-	var committedTxIDs []int64
-	rolledBackTxIDs := make(map[int64]struct{})
+	transactionGroups := make(map[int64][]WalRecord)
+	var committedTransactionIDs []int64
+	rolledBackTransactionIDs := make(map[int64]struct{})
 
 	for _, walRecord := range walRecords {
-		txGroups[walRecord.TransactionID] = append(txGroups[walRecord.TransactionID], walRecord)
+		transactionGroups[walRecord.TransactionID] = append(transactionGroups[walRecord.TransactionID], walRecord)
 		if walRecord.Type == OpCommitTransaction {
-			committedTxIDs = append(committedTxIDs, walRecord.TransactionID)
+			committedTransactionIDs = append(committedTransactionIDs, walRecord.TransactionID)
 		} else if walRecord.Type == OpRollbackTransaction {
-			rolledBackTxIDs[walRecord.TransactionID] = struct{}{}
+			rolledBackTransactionIDs[walRecord.TransactionID] = struct{}{}
 		}
 	}
 
 	// Filter out rolled back or incomplete transactions
 	var activeCommits []int64
-	for _, txID := range committedTxIDs {
-		if _, rolled := rolledBackTxIDs[txID]; !rolled {
-			activeCommits = append(activeCommits, txID)
+	for _, transactionID := range committedTransactionIDs {
+		if _, rolled := rolledBackTransactionIDs[transactionID]; !rolled {
+			activeCommits = append(activeCommits, transactionID)
 		}
 	}
 
 	// Sort active commits by generation
 	sort.Slice(activeCommits, func(indexLeft, indexRight int) bool {
-		recordsLeft := txGroups[activeCommits[indexLeft]]
-		recordsRight := txGroups[activeCommits[indexRight]]
+		recordsLeft := transactionGroups[activeCommits[indexLeft]]
+		recordsRight := transactionGroups[activeCommits[indexRight]]
 		generationLeft := int64(0)
 		generationRight := int64(0)
 		if len(recordsLeft) > 0 {
@@ -479,8 +479,8 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 		}
 	}
 
-	for _, txID := range activeCommits {
-		walRecordsGroup := txGroups[txID]
+	for _, transactionID := range activeCommits {
+		walRecordsGroup := transactionGroups[transactionID]
 		for _, walRecord := range walRecordsGroup {
 			if walRecord.Generation > currentGen {
 				currentGen = walRecord.Generation
@@ -493,21 +493,21 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 			payloadReader := bytes.NewReader(walRecord.Payload)
 			switch walRecord.Type {
 			case OpInsert, OpUpsert, OpUpdate:
-				tableName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				tableName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
-				entityClassName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				entityClassName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
 				var payloadLength int32
-				if err := binary.Read(payloadReader, binary.BigEndian, &payloadLength); err != nil {
-					return nil, err
+				if error := binary.Read(payloadReader, binary.BigEndian, &payloadLength); error != nil {
+					return nil, error
 				}
 				recordBytes := make([]byte, payloadLength)
-				if _, err := io.ReadFull(payloadReader, recordBytes); err != nil {
-					return nil, err
+				if _, error := io.ReadFull(payloadReader, recordBytes); error != nil {
+					return nil, error
 				}
 
 				entityType := getRegisteredType(entityClassName)
@@ -516,8 +516,8 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				}
 
 				newRecordValue := reflect.New(entityType)
-				if err := Unmarshal(recordBytes, newRecordValue.Interface()); err != nil {
-					return nil, err
+				if error := Unmarshal(recordBytes, newRecordValue.Interface()); error != nil {
+					return nil, error
 				}
 				record := newRecordValue.Elem().Interface()
 
@@ -528,14 +528,14 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 					databaseState.Tables[tableName] = tableState
 				}
 
-				tableStorageVal, err := database.getTableStorage(tableName)
-				if err != nil {
-					return nil, err
+				tableStorageValue, error := database.getTableStorage(tableName)
+				if error != nil {
+					return nil, error
 				}
 
 				if !clearedTables[tableName] {
-					if err := tableStorageVal.Reset(); err != nil {
-						return nil, err
+					if error := tableStorageValue.Reset(); error != nil {
+						return nil, error
 					}
 					clearedTables[tableName] = true
 				}
@@ -544,8 +544,8 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				oldRecordPointer, found := tableState.RecordPointers[id]
 				var oldRecord any
 				if found {
-					oldRecordBytes, err := tableStorageVal.ReadRecord(oldRecordPointer)
-					if err == nil {
+					oldRecordBytes, error := tableStorageValue.ReadRecord(oldRecordPointer)
+					if error == nil {
 						oldRecordReflectValue := reflect.New(entityType)
 						if Unmarshal(oldRecordBytes, oldRecordReflectValue.Interface()) == nil {
 							oldRecord = oldRecordReflectValue.Elem().Interface()
@@ -553,9 +553,9 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 					}
 				}
 
-				recordPointer, err := tableStorageVal.AppendRecord(recordBytes)
-				if err != nil {
-					return nil, err
+				recordPointer, error := tableStorageValue.AppendRecord(recordBytes)
+				if error != nil {
+					return nil, error
 				}
 
 				if walRecord.Type == OpInsert {
@@ -565,31 +565,31 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				}
 
 			case OpDelete:
-				tableName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				tableName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
-				_, err = readString(payloadReader) // skip idClassName
-				if err != nil {
-					return nil, err
+				_, error = readString(payloadReader) // skip idClassName
+				if error != nil {
+					return nil, error
 				}
-				primaryKey, err := readValue(payloadReader)
-				if err != nil {
-					return nil, err
+				primaryKey, error := readValue(payloadReader)
+				if error != nil {
+					return nil, error
 				}
 
 				tableState := databaseState.Tables[tableName]
 				if tableState != nil {
-					tableStorageVal, err := database.getTableStorage(tableName)
-					if err != nil {
-						return nil, err
+					tableStorageValue, error := database.getTableStorage(tableName)
+					if error != nil {
+						return nil, error
 					}
 
 					oldRecordPointer, found := tableState.RecordPointers[primaryKey]
 					var oldRecord any
 					if found {
-						oldRecordBytes, err := tableStorageVal.ReadRecord(oldRecordPointer)
-						if err == nil {
+						oldRecordBytes, error := tableStorageValue.ReadRecord(oldRecordPointer)
+						if error == nil {
 							oldRecordReflectValue := reflect.New(tableState.EntityType)
 							if Unmarshal(oldRecordBytes, oldRecordReflectValue.Interface()) == nil {
 								oldRecord = oldRecordReflectValue.Elem().Interface()
@@ -600,9 +600,9 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				}
 
 			case OpClearTable:
-				tableName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				tableName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
 				tableState := databaseState.Tables[tableName]
 				if tableState != nil {
@@ -610,17 +610,17 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				}
 
 			case OpCreateTable:
-				tableName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				tableName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
-				idClassName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				idClassName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
-				entityClassName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				entityClassName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
 
 				idType := getRegisteredType(idClassName)
@@ -636,28 +636,28 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				databaseState.Tables[tableName] = tableState
 
 			case OpDropTable:
-				tableName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				tableName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
 				delete(databaseState.Tables, tableName)
 
 			case OpCreateIndex:
-				tableName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				tableName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
-				indexName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				indexName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
 				var unique bool
-				if err := binary.Read(payloadReader, binary.BigEndian, &unique); err != nil {
-					return nil, err
+				if error := binary.Read(payloadReader, binary.BigEndian, &unique); error != nil {
+					return nil, error
 				}
 				var ordered bool
-				if err := binary.Read(payloadReader, binary.BigEndian, &ordered); err != nil {
-					return nil, err
+				if error := binary.Read(payloadReader, binary.BigEndian, &ordered); error != nil {
+					return nil, error
 				}
 
 				tableState := databaseState.Tables[tableName]
@@ -683,14 +683,14 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 					tableState.Indexes[indexName] = indexState
 
 					// Populate
-					tableStorageVal, err := database.getTableStorage(tableName)
-					if err != nil {
-						return nil, err
+					tableStorageValue, error := database.getTableStorage(tableName)
+					if error != nil {
+						return nil, error
 					}
 
 					for primaryKey, recordPointer := range tableState.RecordPointers {
-						recordBytes, err := tableStorageVal.ReadRecord(recordPointer)
-						if err == nil {
+						recordBytes, error := tableStorageValue.ReadRecord(recordPointer)
+						if error == nil {
 							newRecordReflectValue := reflect.New(tableState.EntityType)
 							if Unmarshal(recordBytes, newRecordReflectValue.Interface()) == nil {
 								record := newRecordReflectValue.Elem().Interface()
@@ -702,13 +702,13 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				}
 
 			case OpDropIndex:
-				tableName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				tableName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
-				indexName, err := readString(payloadReader)
-				if err != nil {
-					return nil, err
+				indexName, error := readString(payloadReader)
+				if error != nil {
+					return nil, error
 				}
 
 				tableState := databaseState.Tables[tableName]
@@ -756,9 +756,9 @@ func getRegisteredType(name string) reflect.Type {
 	defer typeRegistry.mu.RUnlock()
 	reflectType, found := typeRegistry.m[name]
 	if !found {
-		for keyName, valType := range typeRegistry.m {
+		for keyName, valueType := range typeRegistry.m {
 			if strings.EqualFold(keyName, name) {
-				return valType
+				return valueType
 			}
 		}
 	}
@@ -767,17 +767,17 @@ func getRegisteredType(name string) reflect.Type {
 
 func writeSnapshot(directory string, state *DatabaseState, database *Database) error {
 	generation := state.Generation
-	tmpPath := filepath.Join(directory, fmt.Sprintf("snapshot.%d.tmp", generation))
+	temporaryPath := filepath.Join(directory, fmt.Sprintf("snapshot.%d.tmp", generation))
 	finalPath := filepath.Join(directory, fmt.Sprintf("snapshot.%d", generation))
 
-	snapshotFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
+	snapshotFile, error := os.OpenFile(temporaryPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if error != nil {
+		return error
 	}
 	defer func() {
 		if snapshotFile != nil {
 			snapshotFile.Close()
-			_ = os.Remove(tmpPath)
+			_ = os.Remove(temporaryPath)
 		}
 	}()
 
@@ -785,98 +785,98 @@ func writeSnapshot(directory string, state *DatabaseState, database *Database) e
 	hash := crc32.New(crcTable)
 	writer := io.MultiWriter(snapshotFile, hash)
 
-	if err := binary.Write(writer, binary.BigEndian, SnapshotMagic); err != nil {
-		return err
+	if error := binary.Write(writer, binary.BigEndian, SnapshotMagic); error != nil {
+		return error
 	}
-	if err := binary.Write(writer, binary.BigEndian, generation); err != nil {
-		return err
+	if error := binary.Write(writer, binary.BigEndian, generation); error != nil {
+		return error
 	}
-	if err := binary.Write(writer, binary.BigEndian, int32(len(state.Tables))); err != nil {
-		return err
+	if error := binary.Write(writer, binary.BigEndian, int32(len(state.Tables))); error != nil {
+		return error
 	}
 
 	for _, tableState := range state.Tables {
-		if err := writeString(writer, tableState.TableName); err != nil {
-			return err
+		if error := writeString(writer, tableState.TableName); error != nil {
+			return error
 		}
-		if err := writeString(writer, tableState.IdType.String()); err != nil {
-			return err
+		if error := writeString(writer, tableState.IdType.String()); error != nil {
+			return error
 		}
-		if err := writeString(writer, tableState.EntityType.String()); err != nil {
-			return err
+		if error := writeString(writer, tableState.EntityType.String()); error != nil {
+			return error
 		}
 
-		if err := binary.Write(writer, binary.BigEndian, int32(len(tableState.IndexMetadataList))); err != nil {
-			return err
+		if error := binary.Write(writer, binary.BigEndian, int32(len(tableState.IndexMetadataList))); error != nil {
+			return error
 		}
 		for _, indexMetadata := range tableState.IndexMetadataList {
-			if err := writeString(writer, indexMetadata.IndexName); err != nil {
-				return err
+			if error := writeString(writer, indexMetadata.IndexName); error != nil {
+				return error
 			}
-			if err := writeString(writer, indexMetadata.FieldName); err != nil {
-				return err
+			if error := writeString(writer, indexMetadata.FieldName); error != nil {
+				return error
 			}
-			if err := binary.Write(writer, binary.BigEndian, indexMetadata.Unique); err != nil {
-				return err
+			if error := binary.Write(writer, binary.BigEndian, indexMetadata.Unique); error != nil {
+				return error
 			}
-			if err := binary.Write(writer, binary.BigEndian, indexMetadata.Ordered); err != nil {
-				return err
+			if error := binary.Write(writer, binary.BigEndian, indexMetadata.Ordered); error != nil {
+				return error
 			}
 		}
 
-		tableStorageVal, err := database.getTableStorage(tableState.TableName)
-		if err != nil {
-			return err
+		tableStorageValue, error := database.getTableStorage(tableState.TableName)
+		if error != nil {
+			return error
 		}
 
-		if err := binary.Write(writer, binary.BigEndian, int32(len(tableState.RecordPointers))); err != nil {
-			return err
+		if error := binary.Write(writer, binary.BigEndian, int32(len(tableState.RecordPointers))); error != nil {
+			return error
 		}
 		for _, recordPointer := range tableState.RecordPointers {
-			recordBytes, err := tableStorageVal.ReadRecord(recordPointer)
-			if err != nil {
-				return err
+			recordBytes, error := tableStorageValue.ReadRecord(recordPointer)
+			if error != nil {
+				return error
 			}
-			if err := binary.Write(writer, binary.BigEndian, int32(len(recordBytes))); err != nil {
-				return err
+			if error := binary.Write(writer, binary.BigEndian, int32(len(recordBytes))); error != nil {
+				return error
 			}
-			if _, err := writer.Write(recordBytes); err != nil {
-				return err
+			if _, error := writer.Write(recordBytes); error != nil {
+				return error
 			}
 		}
 	}
 
 	checksum := hash.Sum32()
-	if err := binary.Write(snapshotFile, binary.BigEndian, int64(checksum)); err != nil {
-		return err
+	if error := binary.Write(snapshotFile, binary.BigEndian, int64(checksum)); error != nil {
+		return error
 	}
 
-	if err := snapshotFile.Sync(); err != nil {
-		return err
+	if error := snapshotFile.Sync(); error != nil {
+		return error
 	}
-	if err := snapshotFile.Close(); err != nil {
-		return err
+	if error := snapshotFile.Close(); error != nil {
+		return error
 	}
 	snapshotFile = nil
 
-	return os.Rename(tmpPath, finalPath)
+	return os.Rename(temporaryPath, finalPath)
 }
 
 func readSnapshot(directory string, database *Database) (*DatabaseState, error) {
-	snapshotPath, _, err := findLatestSnapshot(directory)
-	if err != nil || snapshotPath == "" {
+	snapshotPath, _, error := findLatestSnapshot(directory)
+	if error != nil || snapshotPath == "" {
 		return nil, nil
 	}
 
-	snapshotFile, err := os.Open(snapshotPath)
-	if err != nil {
-		return nil, err
+	snapshotFile, error := os.Open(snapshotPath)
+	if error != nil {
+		return nil, error
 	}
 	defer snapshotFile.Close()
 
-	fileInfo, err := snapshotFile.Stat()
-	if err != nil {
-		return nil, err
+	fileInfo, error := snapshotFile.Stat()
+	if error != nil {
+		return nil, error
 	}
 	if fileInfo.Size() < 20 {
 		return nil, fmt.Errorf("corrupt snapshot: file too small")
@@ -890,36 +890,36 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 	teeReader := io.TeeReader(limitReader, hash)
 
 	var magic int32
-	if err := binary.Read(teeReader, binary.BigEndian, &magic); err != nil {
-		return nil, err
+	if error := binary.Read(teeReader, binary.BigEndian, &magic); error != nil {
+		return nil, error
 	}
 	if magic != SnapshotMagic {
 		return nil, fmt.Errorf("corrupt snapshot: magic mismatch")
 	}
 
 	var snapshotGen int64
-	if err := binary.Read(teeReader, binary.BigEndian, &snapshotGen); err != nil {
-		return nil, err
+	if error := binary.Read(teeReader, binary.BigEndian, &snapshotGen); error != nil {
+		return nil, error
 	}
 	var tableCount int32
-	if err := binary.Read(teeReader, binary.BigEndian, &tableCount); err != nil {
-		return nil, err
+	if error := binary.Read(teeReader, binary.BigEndian, &tableCount); error != nil {
+		return nil, error
 	}
 
 	databaseState := NewDatabaseState(snapshotGen)
 
 	for tableIndex := 0; tableIndex < int(tableCount); tableIndex++ {
-		tableName, err := readString(teeReader)
-		if err != nil {
-			return nil, err
+		tableName, error := readString(teeReader)
+		if error != nil {
+			return nil, error
 		}
-		idClassName, err := readString(teeReader)
-		if err != nil {
-			return nil, err
+		idClassName, error := readString(teeReader)
+		if error != nil {
+			return nil, error
 		}
-		entityClassName, err := readString(teeReader)
-		if err != nil {
-			return nil, err
+		entityClassName, error := readString(teeReader)
+		if error != nil {
+			return nil, error
 		}
 
 		entityType := getRegisteredType(entityClassName)
@@ -932,27 +932,27 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 		}
 
 		var indexCount int32
-		if err := binary.Read(teeReader, binary.BigEndian, &indexCount); err != nil {
-			return nil, err
+		if error := binary.Read(teeReader, binary.BigEndian, &indexCount); error != nil {
+			return nil, error
 		}
 
 		var indexMetas []IndexMetadata
 		for index := 0; index < int(indexCount); index++ {
-			indexName, err := readString(teeReader)
-			if err != nil {
-				return nil, err
+			indexName, error := readString(teeReader)
+			if error != nil {
+				return nil, error
 			}
-			fieldName, err := readString(teeReader)
-			if err != nil {
-				return nil, err
+			fieldName, error := readString(teeReader)
+			if error != nil {
+				return nil, error
 			}
 			var unique bool
-			if err := binary.Read(teeReader, binary.BigEndian, &unique); err != nil {
-				return nil, err
+			if error := binary.Read(teeReader, binary.BigEndian, &unique); error != nil {
+				return nil, error
 			}
 			var ordered bool
-			if err := binary.Read(teeReader, binary.BigEndian, &ordered); err != nil {
-				return nil, err
+			if error := binary.Read(teeReader, binary.BigEndian, &ordered); error != nil {
+				return nil, error
 			}
 			indexMetas = append(indexMetas, IndexMetadata{
 				IndexName: indexName,
@@ -965,36 +965,36 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 		tableState := NewTableState(tableName, idType, entityType, indexMetas)
 
 		var recordCount int32
-		if err := binary.Read(teeReader, binary.BigEndian, &recordCount); err != nil {
-			return nil, err
+		if error := binary.Read(teeReader, binary.BigEndian, &recordCount); error != nil {
+			return nil, error
 		}
 
 		storagePath := filepath.Join(directory, tableName+".db")
 		_ = os.Remove(storagePath)
-		tableStorageVal, err := database.getTableStorage(tableName)
-		if err != nil {
-			return nil, err
+		tableStorageValue, error := database.getTableStorage(tableName)
+		if error != nil {
+			return nil, error
 		}
 
 		for recordIndex := 0; recordIndex < int(recordCount); recordIndex++ {
 			var recordLength int32
-			if err := binary.Read(teeReader, binary.BigEndian, &recordLength); err != nil {
-				return nil, err
+			if error := binary.Read(teeReader, binary.BigEndian, &recordLength); error != nil {
+				return nil, error
 			}
 			recordBytes := make([]byte, recordLength)
-			if _, err := io.ReadFull(teeReader, recordBytes); err != nil {
-				return nil, err
+			if _, error := io.ReadFull(teeReader, recordBytes); error != nil {
+				return nil, error
 			}
 
 			newRecordValue := reflect.New(entityType)
-			if err := Unmarshal(recordBytes, newRecordValue.Interface()); err != nil {
-				return nil, err
+			if error := Unmarshal(recordBytes, newRecordValue.Interface()); error != nil {
+				return nil, error
 			}
 			record := newRecordValue.Elem().Interface()
 
-			recordPointer, err := tableStorageVal.AppendRecord(recordBytes)
-			if err != nil {
-				return nil, err
+			recordPointer, error := tableStorageValue.AppendRecord(recordBytes)
+			if error != nil {
+				return nil, error
 			}
 			tableState.Insert(record, recordPointer)
 		}
@@ -1004,21 +1004,21 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 
 	var buffer [1024]byte
 	for {
-		_, err := teeReader.Read(buffer[:])
-		if err == io.EOF {
+		_, error := teeReader.Read(buffer[:])
+		if error == io.EOF {
 			break
 		}
-		if err != nil {
-			return nil, err
+		if error != nil {
+			return nil, error
 		}
 	}
 
-	if _, err := snapshotFile.Seek(dataLength, io.SeekStart); err != nil {
-		return nil, err
+	if _, error := snapshotFile.Seek(dataLength, io.SeekStart); error != nil {
+		return nil, error
 	}
 	var fileChecksum int64
-	if err := binary.Read(snapshotFile, binary.BigEndian, &fileChecksum); err != nil {
-		return nil, err
+	if error := binary.Read(snapshotFile, binary.BigEndian, &fileChecksum); error != nil {
+		return nil, error
 	}
 
 	computedChecksum := int64(hash.Sum32())
@@ -1030,12 +1030,12 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 }
 
 func findLatestSnapshot(directory string) (string, int64, error) {
-	files, err := os.ReadDir(directory)
-	if err != nil {
-		if os.IsNotExist(err) {
+	files, error := os.ReadDir(directory)
+	if error != nil {
+		if os.IsNotExist(error) {
 			return "", 0, nil
 		}
-		return "", 0, err
+		return "", 0, error
 	}
 
 	var latestPath string
@@ -1045,8 +1045,8 @@ func findLatestSnapshot(directory string) (string, int64, error) {
 		name := fileEntry.Name()
 		if strings.HasPrefix(name, "snapshot.") && !strings.HasSuffix(name, ".tmp") {
 			var generation int64
-			_, err := fmt.Sscanf(name, "snapshot.%d", &generation)
-			if err == nil {
+			_, error := fmt.Sscanf(name, "snapshot.%d", &generation)
+			if error == nil {
 				if generation > maxGeneration {
 					maxGeneration = generation
 					latestPath = filepath.Join(directory, name)
@@ -1066,43 +1066,43 @@ func (database *Database) ExportJSON(destinationPath string) error {
 	jsonDb := make(map[string][]any)
 
 	for tableName, tableState := range committed.Tables {
-		tableStorageVal, err := database.getTableStorage(tableName)
-		if err != nil {
-			return err
+		tableStorageValue, error := database.getTableStorage(tableName)
+		if error != nil {
+			return error
 		}
 
 		var records []any
 		for _, recordPointer := range tableState.RecordPointers {
-			bytesValue, err := tableStorageVal.ReadRecord(recordPointer)
-			if err != nil {
-				return err
+			bytesValue, error := tableStorageValue.ReadRecord(recordPointer)
+			if error != nil {
+				return error
 			}
 			newRecordValue := reflect.New(tableState.EntityType)
-			if err := Unmarshal(bytesValue, newRecordValue.Interface()); err != nil {
-				return err
+			if error := Unmarshal(bytesValue, newRecordValue.Interface()); error != nil {
+				return error
 			}
 			records = append(records, newRecordValue.Elem().Interface())
 		}
 		jsonDb[tableName] = records
 	}
 
-	importExportJSON, err := json.MarshalIndent(jsonDb, "", "  ")
-	if err != nil {
-		return err
+	importExportJSON, error := json.MarshalIndent(jsonDb, "", "  ")
+	if error != nil {
+		return error
 	}
 
 	return os.WriteFile(destinationPath, importExportJSON, 0644)
 }
 
 func (database *Database) ImportJSON(sourcePath string) error {
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		return err
+	data, readError := os.ReadFile(sourcePath)
+	if readError != nil {
+		return readError
 	}
 
 	var rawMap map[string][]json.RawMessage
-	if err := json.Unmarshal(data, &rawMap); err != nil {
-		return err
+	if error := json.Unmarshal(data, &rawMap); error != nil {
+		return error
 	}
 
 	return database.Transaction(func(transaction *Transaction) error {
@@ -1114,13 +1114,13 @@ func (database *Database) ImportJSON(sourcePath string) error {
 
 			for _, rawJsonRow := range jsonRows {
 				newRecordValue := reflect.New(committedTable.EntityType)
-				if err := json.Unmarshal(rawJsonRow, newRecordValue.Interface()); err != nil {
-					return err
+				if error := json.Unmarshal(rawJsonRow, newRecordValue.Interface()); error != nil {
+					return error
 				}
 				
-				err := transaction.InsertDynamic(tableName, newRecordValue.Elem().Interface())
-				if err != nil {
-					return err
+				error := transaction.InsertDynamic(tableName, newRecordValue.Elem().Interface())
+				if error != nil {
+					return error
 				}
 			}
 		}
@@ -1133,37 +1133,37 @@ func (database *Database) Backup(backupDirectory string) error {
 	defer database.writeLock.Unlock()
 
 	if database.closed {
-		return ErrClosed
+		return DatabaseClosedError
 	}
 
-	if err := os.MkdirAll(backupDirectory, 0755); err != nil {
-		return fmt.Errorf("failed to create backup directory: %w", err)
+	if error := os.MkdirAll(backupDirectory, 0755); error != nil {
+		return fmt.Errorf("failed to create backup directory: %w", error)
 	}
 
 	walPath := filepath.Join(database.directory, "wal.log")
-	if _, err := os.Stat(walPath); err == nil {
-		destWalPath := filepath.Join(backupDirectory, "wal.log")
-		if err := copyFile(walPath, destWalPath); err != nil {
-			return fmt.Errorf("failed to backup WAL log: %w", err)
+	if _, error := os.Stat(walPath); error == nil {
+		destinationWalPath := filepath.Join(backupDirectory, "wal.log")
+		if error := copyFile(walPath, destinationWalPath); error != nil {
+			return fmt.Errorf("failed to backup WAL log: %w", error)
 		}
 	}
 
 	committed := database.getCommittedState()
 	for tableName := range committed.Tables {
-		srcPath := filepath.Join(database.directory, tableName+".db")
-		if _, err := os.Stat(srcPath); err == nil {
-			destPath := filepath.Join(backupDirectory, tableName+".db")
-			if err := copyFile(srcPath, destPath); err != nil {
-				return fmt.Errorf("failed to backup table storage for %s: %w", tableName, err)
+		sourcePath := filepath.Join(database.directory, tableName+".db")
+		if _, error := os.Stat(sourcePath); error == nil {
+			destinationPath := filepath.Join(backupDirectory, tableName+".db")
+			if error := copyFile(sourcePath, destinationPath); error != nil {
+				return fmt.Errorf("failed to backup table storage for %s: %w", tableName, error)
 			}
 		}
 	}
 
-	snapPath, _, err := findLatestSnapshot(database.directory)
-	if err == nil && snapPath != "" {
-		destSnapPath := filepath.Join(backupDirectory, filepath.Base(snapPath))
-		if err := copyFile(snapPath, destSnapPath); err != nil {
-			return fmt.Errorf("failed to backup latest snapshot: %w", err)
+	snapshotPath, _, error := findLatestSnapshot(database.directory)
+	if error == nil && snapshotPath != "" {
+		destinationSnapshotPath := filepath.Join(backupDirectory, filepath.Base(snapshotPath))
+		if error := copyFile(snapshotPath, destinationSnapshotPath); error != nil {
+			return fmt.Errorf("failed to backup latest snapshot: %w", error)
 		}
 	}
 
@@ -1171,20 +1171,20 @@ func (database *Database) Backup(backupDirectory string) error {
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+	in, error := os.Open(src)
+	if error != nil {
+		return error
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
+	out, error := os.Create(dst)
+	if error != nil {
+		return error
 	}
 	defer out.Close()
 
-	if _, err = io.Copy(out, in); err != nil {
-		return err
+	if _, error = io.Copy(out, in); error != nil {
+		return error
 	}
 	return out.Sync()
 }

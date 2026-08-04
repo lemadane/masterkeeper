@@ -3,25 +3,25 @@ package masterkeeper
 import "errors"
 
 var (
-	ErrTransactionNotActive          = errors.New("transaction is not active")
-	ErrNestedTransactionNotSupported = errors.New("nested write transactions are not supported")
-	ErrClosed                        = errors.New("database is closed")
-	ErrRollbackOnly                  = errors.New("transaction is marked as rollback-only")
+	NotActiveTransactionError          = errors.New("transaction is not active")
+	NestedTransactionNotSupportedError = errors.New("nested write transactions are not supported")
+	DatabaseClosedError                = errors.New("database is closed")
+	RollbackOnlyTransactionError       = errors.New("transaction is marked as rollback-only")
 )
 
-type ErrDuplicateIndex struct {
+type DuplicateIndexError struct {
 	TableName string
 	IndexName string
 	Value     any
 	Message   string
 }
 
-func (duplicateIndexError *ErrDuplicateIndex) Error() string {
+func (duplicateIndexError *DuplicateIndexError) Error() string {
 	return duplicateIndexError.Message
 }
 
-var ErrInvalidTableName = errors.New("invalid table name")
-var ErrIncompatibleTypes = errors.New("incompatible table schema types")
+var InvalidTableNameError = errors.New("invalid table name")
+var IncompatibleTypesError = errors.New("incompatible table schema types")
 
 func isValidTableName(tableName string) bool {
 	if len(tableName) == 0 {

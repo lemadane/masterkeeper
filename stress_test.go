@@ -35,26 +35,26 @@ type Review struct {
 	Rating    int
 }
 
-func TestStressSyncSingleTable(testingT *testing.T) {
-	tempDir, err := os.MkdirTemp("", "keeper-stress-sync-single-*")
-	if err != nil {
-		testingT.Fatalf("failed to create temp dir: %v", err)
+func TestStressSyncSingleTable(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-stress-sync-single-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
 	}
-	defer os.RemoveAll(tempDir)
+	defer os.RemoveAll(tempDirectory)
 
 	options := keeper.DefaultOptions()
 	options.Durability = keeper.DurabilitySync
 	options.RegisterTypes(User{})
 
-	database, err := keeper.Open(tempDir, options)
-	if err != nil {
-		testingT.Fatalf("failed to open database: %v", err)
+	database, testError := keeper.Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
 	}
 	defer database.Close()
 
-	userTable, err := keeper.GetTable[int, User](database, "users")
-	if err != nil {
-		testingT.Fatalf("failed to get table: %v", err)
+	userTable, testError := keeper.GetTable[int, User](database, "users")
+	if testError != nil {
+		test.Fatalf("failed to get table: %v", testError)
 	}
 
 	const numWriters = 10
@@ -71,7 +71,7 @@ func TestStressSyncSingleTable(testingT *testing.T) {
 			defer waitGroup.Done()
 			// Batch the 10,000 inserts inside a single transaction to execute stress testing
 			// of 1,000,000 records without hitting sequential write I/O limits of physical storage sync.
-			err := database.Transaction(func(transaction *keeper.Transaction) error {
+			testError := database.Transaction(func(transaction *keeper.Transaction) error {
 				for index := 0; index < opsPerWriter; index++ {
 					userID := writerID*opsPerWriter + index
 					user := User{
@@ -79,14 +79,14 @@ func TestStressSyncSingleTable(testingT *testing.T) {
 						Name:  fmt.Sprintf("User-%d", userID),
 						Email: fmt.Sprintf("user-%d@example.com", userID),
 					}
-					if err := userTable.Insert(transaction, user); err != nil {
-						return err
+					if testError := userTable.Insert(transaction, user); testError != nil {
+						return testError
 					}
 				}
 				return nil
 			})
-			if err != nil {
-				testingT.Errorf("writer transaction failed: %v", err)
+			if testError != nil {
+				test.Errorf("writer transaction failed: %v", testError)
 			}
 		}(writerIndex)
 	}
@@ -97,12 +97,12 @@ func TestStressSyncSingleTable(testingT *testing.T) {
 			defer waitGroup.Done()
 			randomGenerator := rand.New(rand.NewSource(time.Now().UnixNano()))
 			for index := 0; index < queriesPerQueryer; index++ {
-				queryVal := fmt.Sprintf("User-%d", randomGenerator.Intn(numWriters*opsPerWriter))
-				results, err := userTable.Query(nil).
-					Where(keeper.Eq("Name", queryVal)).
+				queryValue := fmt.Sprintf("User-%d", randomGenerator.Intn(numWriters*opsPerWriter))
+				results, testError := userTable.Query(nil).
+					Where(keeper.Equal("Name", queryValue)).
 					List()
-				if err != nil {
-					testingT.Errorf("query error: %v", err)
+				if testError != nil {
+					test.Errorf("query testError: %v", testError)
 				}
 				_ = results
 				time.Sleep(10 * time.Microsecond)
@@ -114,39 +114,39 @@ func TestStressSyncSingleTable(testingT *testing.T) {
 
 	// Verify all 1,000,000 records are correctly saved
 	for index := 0; index < numWriters*opsPerWriter; index += 1000 { // sample check every 1000th record for speed
-		user, found, err := userTable.FindByID(nil, index)
-		if err != nil {
-			testingT.Fatalf("failed to find user %d: %v", index, err)
+		user, found, testError := userTable.FindByID(nil, index)
+		if testError != nil {
+			test.Fatalf("failed to find user %d: %v", index, testError)
 		}
 		if !found {
-			testingT.Fatalf("user %d was not found", index)
+			test.Fatalf("user %d was not found", index)
 		}
 		if user.Name != fmt.Sprintf("User-%d", index) {
-			testingT.Errorf("incorrect record content for user %d: %+v", index, user)
+			test.Errorf("incorrect record content for user %d: %+v", index, user)
 		}
 	}
 }
 
-func TestStressAsyncSingleTable(testingT *testing.T) {
-	tempDir, err := os.MkdirTemp("", "keeper-stress-async-single-*")
-	if err != nil {
-		testingT.Fatalf("failed to create temp dir: %v", err)
+func TestStressAsyncSingleTable(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-stress-async-single-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
 	}
-	defer os.RemoveAll(tempDir)
+	defer os.RemoveAll(tempDirectory)
 
 	options := keeper.DefaultOptions()
 	options.Durability = keeper.DurabilityAsync
 	options.RegisterTypes(User{})
 
-	database, err := keeper.Open(tempDir, options)
-	if err != nil {
-		testingT.Fatalf("failed to open database: %v", err)
+	database, testError := keeper.Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
 	}
 	defer database.Close()
 
-	userTable, err := keeper.GetTable[int, User](database, "users")
-	if err != nil {
-		testingT.Fatalf("failed to get table: %v", err)
+	userTable, testError := keeper.GetTable[int, User](database, "users")
+	if testError != nil {
+		test.Fatalf("failed to get table: %v", testError)
 	}
 
 	const numWriters = 10
@@ -161,7 +161,7 @@ func TestStressAsyncSingleTable(testingT *testing.T) {
 	for writerIndex := 0; writerIndex < numWriters; writerIndex++ {
 		go func(writerID int) {
 			defer waitGroup.Done()
-			err := database.Transaction(func(transaction *keeper.Transaction) error {
+			testError := database.Transaction(func(transaction *keeper.Transaction) error {
 				for index := 0; index < opsPerWriter; index++ {
 					userID := writerID*opsPerWriter + index
 					user := User{
@@ -169,14 +169,14 @@ func TestStressAsyncSingleTable(testingT *testing.T) {
 						Name:  fmt.Sprintf("User-%d", userID),
 						Email: fmt.Sprintf("user-%d@example.com", userID),
 					}
-					if err := userTable.Insert(transaction, user); err != nil {
-						return err
+					if testError := userTable.Insert(transaction, user); testError != nil {
+						return testError
 					}
 				}
 				return nil
 			})
-			if err != nil {
-				testingT.Errorf("writer transaction failed: %v", err)
+			if testError != nil {
+				test.Errorf("writer transaction failed: %v", testError)
 			}
 		}(writerIndex)
 	}
@@ -187,12 +187,12 @@ func TestStressAsyncSingleTable(testingT *testing.T) {
 			defer waitGroup.Done()
 			randomGenerator := rand.New(rand.NewSource(time.Now().UnixNano()))
 			for index := 0; index < queriesPerQueryer; index++ {
-				queryVal := fmt.Sprintf("User-%d", randomGenerator.Intn(numWriters*opsPerWriter))
-				results, err := userTable.Query(nil).
-					Where(keeper.Eq("Name", queryVal)).
+				queryValue := fmt.Sprintf("User-%d", randomGenerator.Intn(numWriters*opsPerWriter))
+				results, testError := userTable.Query(nil).
+					Where(keeper.Equal("Name", queryValue)).
 					List()
-				if err != nil {
-					testingT.Errorf("query error: %v", err)
+				if testError != nil {
+					test.Errorf("query testError: %v", testError)
 				}
 				_ = results
 				time.Sleep(10 * time.Microsecond)
@@ -204,33 +204,33 @@ func TestStressAsyncSingleTable(testingT *testing.T) {
 
 	// Verify all 1,000,000 records
 	for index := 0; index < numWriters*opsPerWriter; index += 1000 {
-		user, found, err := userTable.FindByID(nil, index)
-		if err != nil {
-			testingT.Fatalf("failed to find user %d: %v", index, err)
+		user, found, testError := userTable.FindByID(nil, index)
+		if testError != nil {
+			test.Fatalf("failed to find user %d: %v", index, testError)
 		}
 		if !found {
-			testingT.Fatalf("user %d was not found", index)
+			test.Fatalf("user %d was not found", index)
 		}
 		if user.Name != fmt.Sprintf("User-%d", index) {
-			testingT.Errorf("incorrect record content for user %d: %+v", index, user)
+			test.Errorf("incorrect record content for user %d: %+v", index, user)
 		}
 	}
 }
 
-func TestStressSyncMultiTable(testingT *testing.T) {
-	tempDir, err := os.MkdirTemp("", "keeper-stress-sync-multi-*")
-	if err != nil {
-		testingT.Fatalf("failed to create temp dir: %v", err)
+func TestStressSyncMultiTable(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-stress-sync-multi-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
 	}
-	defer os.RemoveAll(tempDir)
+	defer os.RemoveAll(tempDirectory)
 
 	options := keeper.DefaultOptions()
 	options.Durability = keeper.DurabilitySync
 	options.RegisterTypes(User{}, Order{}, Product{}, Review{})
 
-	database, err := keeper.Open(tempDir, options)
-	if err != nil {
-		testingT.Fatalf("failed to open database: %v", err)
+	database, testError := keeper.Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
 	}
 	defer database.Close()
 
@@ -251,7 +251,7 @@ func TestStressSyncMultiTable(testingT *testing.T) {
 	for writerIndex := 0; writerIndex < numWriters; writerIndex++ {
 		go func(writerID int) {
 			defer waitGroup.Done()
-			err := database.Transaction(func(transaction *keeper.Transaction) error {
+			testError := database.Transaction(func(transaction *keeper.Transaction) error {
 				for index := 0; index < opsPerWriter; index++ {
 					userID := writerID*opsPerWriter + index
 					
@@ -289,8 +289,8 @@ func TestStressSyncMultiTable(testingT *testing.T) {
 				}
 				return nil
 			})
-			if err != nil {
-				testingT.Errorf("writer transaction failed: %v", err)
+			if testError != nil {
+				test.Errorf("writer transaction failed: %v", testError)
 			}
 		}(writerIndex)
 	}
@@ -307,11 +307,11 @@ func TestStressSyncMultiTable(testingT *testing.T) {
 				_, _, _ = products.FindByID(nil, fmt.Sprintf("p_%d", target))
 				
 				_, _ = orders.Query(nil).
-					Where(keeper.Eq("UserID", target)).
+					Where(keeper.Equal("UserID", target)).
 					List()
 
 				_, _ = reviews.Query(nil).
-					Where(keeper.Eq("ProductID", fmt.Sprintf("p_%d", target))).
+					Where(keeper.Equal("ProductID", fmt.Sprintf("p_%d", target))).
 					List()
 
 				time.Sleep(10 * time.Microsecond)
@@ -323,27 +323,27 @@ func TestStressSyncMultiTable(testingT *testing.T) {
 
 	// Verify records
 	for index := 0; index < numWriters*opsPerWriter; index += 500 {
-		_, found, err := users.FindByID(nil, index)
-		if err != nil || !found {
-			testingT.Fatalf("verification failed for user %d: found=%v, err=%v", index, found, err)
+		_, found, testError := users.FindByID(nil, index)
+		if testError != nil || !found {
+			test.Fatalf("verification failed for user %d: found=%v, testError =%v", index, found, testError)
 		}
 	}
 }
 
-func TestStressAsyncMultiTable(testingT *testing.T) {
-	tempDir, err := os.MkdirTemp("", "keeper-stress-async-multi-*")
-	if err != nil {
-		testingT.Fatalf("failed to create temp dir: %v", err)
+func TestStressAsyncMultiTable(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-stress-async-multi-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
 	}
-	defer os.RemoveAll(tempDir)
+	defer os.RemoveAll(tempDirectory)
 
 	options := keeper.DefaultOptions()
 	options.Durability = keeper.DurabilityAsync
 	options.RegisterTypes(User{}, Order{}, Product{}, Review{})
 
-	database, err := keeper.Open(tempDir, options)
-	if err != nil {
-		testingT.Fatalf("failed to open database: %v", err)
+	database, testError := keeper.Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
 	}
 	defer database.Close()
 
@@ -364,7 +364,7 @@ func TestStressAsyncMultiTable(testingT *testing.T) {
 	for writerIndex := 0; writerIndex < numWriters; writerIndex++ {
 		go func(writerID int) {
 			defer waitGroup.Done()
-			err := database.Transaction(func(transaction *keeper.Transaction) error {
+			testError := database.Transaction(func(transaction *keeper.Transaction) error {
 				for index := 0; index < opsPerWriter; index++ {
 					userID := writerID*opsPerWriter + index
 					
@@ -398,8 +398,8 @@ func TestStressAsyncMultiTable(testingT *testing.T) {
 				}
 				return nil
 			})
-			if err != nil {
-				testingT.Errorf("writer transaction failed: %v", err)
+			if testError != nil {
+				test.Errorf("writer transaction failed: %v", testError)
 			}
 		}(writerIndex)
 	}
@@ -416,11 +416,11 @@ func TestStressAsyncMultiTable(testingT *testing.T) {
 				_, _, _ = products.FindByID(nil, fmt.Sprintf("p_%d", target))
 				
 				_, _ = orders.Query(nil).
-					Where(keeper.Eq("UserID", target)).
+					Where(keeper.Equal("UserID", target)).
 					List()
 
 				_, _ = reviews.Query(nil).
-					Where(keeper.Eq("ProductID", fmt.Sprintf("p_%d", target))).
+					Where(keeper.Equal("ProductID", fmt.Sprintf("p_%d", target))).
 					List()
 
 				time.Sleep(10 * time.Microsecond)
@@ -432,9 +432,9 @@ func TestStressAsyncMultiTable(testingT *testing.T) {
 
 	// Verify records
 	for index := 0; index < numWriters*opsPerWriter; index += 500 {
-		_, found, err := users.FindByID(nil, index)
-		if err != nil || !found {
-			testingT.Fatalf("verification failed for user %d: found=%v, err=%v", index, found, err)
+		_, found, testError := users.FindByID(nil, index)
+		if testError != nil || !found {
+			test.Fatalf("verification failed for user %d: found=%v, testError =%v", index, found, testError)
 		}
 	}
 }
