@@ -19,3 +19,18 @@ type ErrDuplicateIndex struct {
 func (duplicateIndexError *ErrDuplicateIndex) Error() string {
 	return duplicateIndexError.Message
 }
+
+var ErrInvalidTableName = errors.New("invalid table name")
+
+func isValidTableName(tableName string) bool {
+	if len(tableName) == 0 {
+		return false
+	}
+	for _, char := range tableName {
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-') {
+			return false
+		}
+	}
+	return true
+}
+

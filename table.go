@@ -11,6 +11,10 @@ type Table[ID comparable, T any] struct {
 }
 
 func GetTable[ID comparable, T any](database *Database, tableName string) (*Table[ID, T], error) {
+	if !isValidTableName(tableName) {
+		return nil, ErrInvalidTableName
+	}
+
 	var sample T
 	err := database.registerTableMetadata(tableName, reflect.TypeOf((*ID)(nil)).Elem(), reflect.TypeOf(sample))
 	if err != nil {

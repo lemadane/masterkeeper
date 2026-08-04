@@ -912,3 +912,105 @@ func TestTransactionAfterCloseDeadlock(testingT *testing.T) {
 	}
 }
 
+func TestPathTraversalE2E(testingT *testing.T) {
+	tempDir, err := os.MkdirTemp("", "keeper-test-traversal-*")
+	if err != nil {
+		testingT.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(UserRecord{})
+
+	database, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// 1. Attempts to get table with traversal should fail
+	_, err = keeper.GetTable[UserID, UserRecord](database, "../escaped")
+	if err != keeper.ErrInvalidTableName {
+		testingT.Errorf("expected ErrInvalidTableName, got: %v", err)
+	}
+
+	// 2. Attempts to drop table with traversal should fail
+	_, err = database.DropTable("../escaped")
+	if err != keeper.ErrInvalidTableName {
+		testingT.Errorf("expected ErrInvalidTableName on DropTable, got: %v", err)
+	}
+
+	// 3. Confirm that no file escaped.db exists outside/above the db directory
+	parentDir := filepath.Dir(tempDir)
+	escapedDBPath := filepath.Join(parentDir, "escaped.db")
+	if _, err := os.Stat(escapedDBPath); err == nil {
+		testingT.Errorf("vulnerability check failed: escaped.db was created outside database directory at %s", escapedDBPath)
+		_ = os.Remove(escapedDBPath)
+	}
+}
+
+func TestDeadlockE2E(testingT *testing.T) {
+	tempDir, err := os.MkdirTemp("", "keeper-test-deadlock-e2e-*")
+	if err != nil {
+		testingT.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(UserRecord{})
+
+	database, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to open database: %v", err)
+	}
+
+	table, err := keeper.GetTable[UserID, UserRecord](database, "users")
+	if err != nil {
+		database.Close()
+		testingT.Fatalf("failed to get table: %v", err)
+	}
+
+	// Start a transaction that does some work
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(1)
+	go func() {
+		defer waitGroup.Done()
+		err := database.Transaction(func(transaction *keeper.Transaction) error {
+			time.Sleep(50 * time.Millisecond) // hold the lock
+			return table.Insert(transaction, UserRecord{ID: 1, Name: "Alice"})
+		})
+		if err != nil {
+			testingT.Errorf("unexpected error in concurrent transaction: %v", err)
+		}
+	}()
+
+	// Wait a bit to let the transaction start and acquire the lock
+	time.Sleep(10 * time.Millisecond)
+
+	// Close the database concurrently. It should wait for the transaction to finish and not deadlock.
+	closeChan := make(chan struct{})
+	go func() {
+		_ = database.Close()
+		close(closeChan)
+	}()
+
+	select {
+	case <-closeChan:
+		// Database closed successfully
+	case <-time.After(1 * time.Second):
+		testingT.Fatal("deadlock detected: Close did not return within 1 second")
+	}
+
+	waitGroup.Wait()
+
+	// Subsequent operations should fail with ErrClosed
+	err = database.Transaction(func(transaction *keeper.Transaction) error {
+		return nil
+	})
+	if err != keeper.ErrClosed {
+		testingT.Errorf("expected ErrClosed, got %v", err)
+	}
+}
+
+
+

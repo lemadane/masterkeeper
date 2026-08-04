@@ -21,6 +21,10 @@ type TableStorage struct {
 }
 
 func NewTableStorage(directory string, tableName string) (*TableStorage, error) {
+	if !isValidTableName(tableName) {
+		return nil, ErrInvalidTableName
+	}
+
 	if err := os.MkdirAll(directory, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}

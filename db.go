@@ -157,6 +157,10 @@ func (database *Database) publish(nextState *DatabaseState) {
 }
 
 func (database *Database) registerTableMetadata(tableName string, idType reflect.Type, entityType reflect.Type) error {
+	if !isValidTableName(tableName) {
+		return ErrInvalidTableName
+	}
+
 	if _, found := database.tableMetadataMap.Load(tableName); found {
 		return nil
 	}
@@ -272,6 +276,10 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 
 	if database.closed {
 		return false, ErrClosed
+	}
+
+	if !isValidTableName(tableName) {
+		return false, ErrInvalidTableName
 	}
 
 	committed := database.getCommittedState()
