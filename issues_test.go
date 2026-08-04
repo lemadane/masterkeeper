@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type IssueCustomer struct {
@@ -604,8 +605,8 @@ func TestLegacySnapshotMagicCompatibility(test *testing.T) {
 	}
 }
 
-func TestLegacyCrossGoroutineNestedTransaction(test *testing.T) {
-	tempDirectory, testError := os.MkdirTemp("", "keeper-test-legacy-cross-tx-*")
+func TestCrossGoroutineNestedTransactionContextCancellation(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-context-cancel-*")
 	if testError != nil {
 		test.Fatalf("failed to create temp directory: %v", testError)
 	}
@@ -620,19 +621,38 @@ func TestLegacyCrossGoroutineNestedTransaction(test *testing.T) {
 	}
 	defer database.Close()
 
-	testError = database.Transaction(func(outer *Transaction) error {
+	testError = database.TransactionContext(context.Background(), func(ctx context.Context, outer *Transaction) error {
 		resultChan := make(chan error)
 		go func() {
-			resultChan <- database.Transaction(func(inner *Transaction) error {
+			cancelCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			defer cancel()
+			resultChan <- database.TransactionContext(cancelCtx, func(ctx context.Context, inner *Transaction) error {
 				return nil
 			})
 		}()
 		return <-resultChan
 	})
 
-	if !errors.Is(testError, NestedTransactionNotSupportedError) {
-		test.Errorf("expected NestedTransactionNotSupportedError for legacy cross-goroutine nested tx, got: %v", testError)
+	if !errors.Is(testError, context.DeadlineExceeded) && !errors.Is(testError, context.Canceled) {
+		test.Errorf("expected context cancellation or deadline error, got: %v", testError)
 	}
+}
+
+func TestRegisterTypesNilValidation(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-register-nil-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(nil)
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
 }
 
 func TestUnknownWALOperationRejection(test *testing.T) {

@@ -49,7 +49,7 @@ type Database struct {
 	directory            string
 	durability           DurabilityMode
 	walManager           *WalManager
-	writeLock            sync.Mutex
+	writeLock            chan struct{}
 	activeGoroutineID    atomic.Int64
 	committedState       atomic.Pointer[DatabaseState]
 	tableMetadataMap     sync.Map // tableName -> TableMetadata
@@ -70,7 +70,9 @@ func Open(directory string, options Options) (*Database, error) {
 		directory:  directory,
 		durability: options.Durability,
 		databaseID: rand.Int63() & 0x7fffffffffffffff,
+		writeLock:  make(chan struct{}, 1),
 	}
+	database.writeLock <- struct{}{}
 
 	// Resolve table storage resolver function
 	tableStorageResolver := func(tableName string) (*TableStorage, error) {
@@ -152,9 +154,25 @@ func (database *Database) getTableStorage(tableName string) (*TableStorage, erro
 	return tableStorageValue, nil
 }
 
+func (database *Database) lock(ctx context.Context) error {
+	select {
+	case <-database.writeLock:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (database *Database) unlock() {
+	select {
+	case database.writeLock <- struct{}{}:
+	default:
+	}
+}
+
 func (database *Database) releaseWriterLock() {
 	database.activeGoroutineID.Store(0)
-	database.writeLock.Unlock()
+	database.unlock()
 }
 
 func (database *Database) publish(nextState *DatabaseState) {
@@ -179,8 +197,10 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 		return nil
 	}
 
-	database.writeLock.Lock()
-	defer database.writeLock.Unlock()
+	if err := database.lock(context.Background()); err != nil {
+		return err
+	}
+	defer database.unlock()
 
 	if database.closed.Load() {
 		return DatabaseClosedError
@@ -290,8 +310,10 @@ func (database *Database) ContainsTable(tableName string) bool {
 }
 
 func (database *Database) DropTable(tableName string) (bool, error) {
-	database.writeLock.Lock()
-	defer database.writeLock.Unlock()
+	if err := database.lock(context.Background()); err != nil {
+		return false, err
+	}
+	defer database.unlock()
 
 	if database.closed.Load() {
 		return false, DatabaseClosedError
@@ -365,16 +387,11 @@ func (database *Database) TransactionContext(ctx context.Context, callback func(
 		return NestedTransactionNotSupportedError
 	}
 
-	activeID := database.activeGoroutineID.Load()
-	if activeID != 0 && activeID != currentGoroutineID {
-		if isGoroutineBlocked(activeID) {
-			return NestedTransactionNotSupportedError
-		}
+	if err := database.lock(ctx); err != nil {
+		return err
 	}
-
-	database.writeLock.Lock()
 	if database.closed.Load() {
-		database.writeLock.Unlock()
+		database.unlock()
 		return DatabaseClosedError
 	}
 	database.activeGoroutineID.Store(currentGoroutineID)
@@ -405,8 +422,10 @@ func (database *Database) TransactionContext(ctx context.Context, callback func(
 }
 
 func (database *Database) Close() error {
-	database.writeLock.Lock()
-	defer database.writeLock.Unlock()
+	if err := database.lock(context.Background()); err != nil {
+		return err
+	}
+	defer database.unlock()
 
 	if database.closed.Swap(true) {
 		return nil
@@ -422,8 +441,10 @@ func (database *Database) Close() error {
 }
 
 func (database *Database) Compact() error {
-	database.writeLock.Lock()
-	defer database.writeLock.Unlock()
+	if err := database.lock(context.Background()); err != nil {
+		return err
+	}
+	defer database.unlock()
 
 	if database.closed.Load() {
 		return DatabaseClosedError
@@ -775,6 +796,9 @@ var typeRegistry = typeRegistryStruct{
 }
 
 func RegisterType(value any) {
+	if value == nil {
+		return
+	}
 	typeRegistry.mu.Lock()
 	defer typeRegistry.mu.Unlock()
 	reflectType := reflect.TypeOf(value)
@@ -1241,8 +1265,10 @@ func (database *Database) ImportJSON(sourcePath string) error {
 }
 
 func (database *Database) Backup(backupDirectory string) error {
-	database.writeLock.Lock()
-	defer database.writeLock.Unlock()
+	if err := database.lock(context.Background()); err != nil {
+		return err
+	}
+	defer database.unlock()
 
 	if database.closed.Load() {
 		return DatabaseClosedError
@@ -1375,54 +1401,4 @@ func validateSchema(idType reflect.Type, entityType reflect.Type) error {
 	}
 
 	return nil
-}
-
-func isGoroutineBlocked(id int64) bool {
-	if id == 0 {
-		return false
-	}
-	var buf []byte
-	for size := 1024; size <= 1024*1024; size *= 2 {
-		buf = make([]byte, size)
-		n := runtime.Stack(buf, true)
-		if n < size {
-			buf = buf[:n]
-			break
-		}
-	}
-
-	lines := strings.Split(string(buf), "\n")
-	prefix := fmt.Sprintf("goroutine %d ", id)
-	found := false
-	var statusLine string
-	var goroutineStack []string
-	for _, line := range lines {
-		if strings.HasPrefix(line, prefix) {
-			found = true
-			statusLine = line[len(prefix):]
-			continue
-		}
-		if found {
-			if line == "" {
-				break
-			}
-			goroutineStack = append(goroutineStack, line)
-		}
-	}
-
-	if !found {
-		return false
-	}
-
-	if !strings.Contains(statusLine, "chan receive") && !strings.Contains(statusLine, "select") && !strings.Contains(statusLine, "semacquire") {
-		return false
-	}
-
-	for _, stackLine := range goroutineStack {
-		if strings.Contains(stackLine, "(*Transaction).Commit") {
-			return false
-		}
-	}
-
-	return true
 }
