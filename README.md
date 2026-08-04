@@ -197,9 +197,10 @@ While both engines use WAL, they do so at different abstraction levels:
 
 To maintain safe concurrency and prevent transaction writer lock starvation or deadlocks, observe the following rules:
 
-- **Use `Transaction()` for simple, single-goroutine transactions**: The legacy `Transaction()` method is context-free and uses a configurable timeout (default 30 seconds) to acquire the writer lock, returning `TransactionWaitTimeoutError` on timeout.
-- **Use `TransactionContext()` for concurrent, cancellable, or timed-out transactions**: Prefer `TransactionContext()` if you are using Go concurrency, cancellations, or deadlines.
-- **Always propagate the transaction context (`txCtx`)**: When launching child goroutines or starting related transactional units of work from within a transaction callback, pass the propagated `txCtx` context:
+- **`Transaction()` is intended for ordinary single-goroutine transactions**: The legacy `Transaction()` method is context-free. By default, it waits indefinitely for lock acquisition. 
+- **Applications that want bounded legacy waits must explicitly configure `TransactionWaitTimeout`**: Set `TransactionWaitTimeout` to a positive duration in `Options` to make legacy transactions time out after a specified duration, returning `TransactionWaitTimeoutError` (wrapping `context.DeadlineExceeded`).
+- **`TransactionContext()` is required for cancellation, deadlines, and related goroutines**: Use `TransactionContext()` if you need explicit context propagation, cancellation, or custom timeouts.
+- **Always propagate the transaction context (`txCtx`)**: When launching child goroutines or starting related transactional units of work from within an active transaction, pass the propagated `txCtx` context:
   ```go
   db.TransactionContext(ctx, func(txCtx context.Context, outer *Transaction) error {
       return db.TransactionContext(txCtx, func(nestedCtx context.Context, inner *Transaction) error {
@@ -208,7 +209,7 @@ To maintain safe concurrency and prevent transaction writer lock starvation or d
   })
   ```
   This will immediately return `NestedTransactionNotSupportedError` instead of deadlocking.
-- **Never start a legacy nested transaction on a spawned goroutine**: Never start a child transaction via `Transaction()` and block waiting for it inside an active transaction, as this will lead to a transaction writer lock timeout.
+- **Never start a legacy nested transaction on a spawned goroutine**: Never launch a child transaction via `Transaction()` and block waiting for it inside an active transaction.
 
 ---
 

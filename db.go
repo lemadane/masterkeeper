@@ -33,7 +33,7 @@ type Options struct {
 func DefaultOptions() Options {
 	return Options{
 		Durability:             DurabilitySync,
-		TransactionWaitTimeout: 30 * time.Second,
+		TransactionWaitTimeout: 0,
 	}
 }
 
@@ -66,14 +66,13 @@ type Database struct {
 }
 
 func Open(directory string, options Options) (*Database, error) {
+	if options.TransactionWaitTimeout < 0 {
+		return nil, InvalidTransactionWaitTimeoutError
+	}
+
 	// Register all types specified in options
 	for _, typeValue := range options.Types {
 		RegisterType(typeValue)
-	}
-
-	timeout := options.TransactionWaitTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
 	}
 
 	database := &Database{
@@ -81,7 +80,7 @@ func Open(directory string, options Options) (*Database, error) {
 		durability:             options.Durability,
 		databaseID:             rand.Int63() & 0x7fffffffffffffff,
 		writeLock:              make(chan struct{}, 1),
-		transactionWaitTimeout: timeout,
+		transactionWaitTimeout: options.TransactionWaitTimeout,
 	}
 	database.writeLock <- struct{}{}
 
@@ -165,12 +164,25 @@ func (database *Database) getTableStorage(tableName string) (*TableStorage, erro
 	return tableStorageValue, nil
 }
 
-func (database *Database) lock(ctx context.Context) error {
+func (database *Database) lock(contextValue context.Context) error {
+	if contextValue == nil {
+		return InvalidTransactionContextError
+	}
+
+	if actualError := contextValue.Err(); actualError != nil {
+		return actualError
+	}
+
 	select {
+	case <-contextValue.Done():
+		return contextValue.Err()
+
 	case <-database.writeLock:
+		if actualError := contextValue.Err(); actualError != nil {
+			database.unlock()
+			return actualError
+		}
 		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
@@ -208,8 +220,8 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 		return nil
 	}
 
-	if err := database.lock(context.Background()); err != nil {
-		return err
+	if lockError := database.lock(context.Background()); lockError != nil {
+		return lockError
 	}
 	defer database.unlock()
 
@@ -321,8 +333,8 @@ func (database *Database) ContainsTable(tableName string) bool {
 }
 
 func (database *Database) DropTable(tableName string) (bool, error) {
-	if err := database.lock(context.Background()); err != nil {
-		return false, err
+	if lockError := database.lock(context.Background()); lockError != nil {
+		return false, lockError
 	}
 	defer database.unlock()
 
@@ -380,71 +392,49 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 	return true, nil
 }
 
-type txContextKey struct{}
+type transactionContextKey struct{}
 
 func (database *Database) Transaction(callback func(transaction *Transaction) error) error {
-	currentGoroutineID := getGoroutineID()
-	if database.activeGoroutineID.Load() == currentGoroutineID {
-		return NestedTransactionNotSupportedError
+	contextValue := context.Background()
+	cancelFunction := func() {}
+
+	if database.transactionWaitTimeout > 0 {
+		contextValue, cancelFunction = context.WithTimeout(context.Background(), database.transactionWaitTimeout)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), database.transactionWaitTimeout)
-	err := database.lock(ctx)
-	cancel()
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return TransactionWaitTimeoutError
-		}
-		return err
-	}
-
-	if database.closed.Load() {
-		database.unlock()
-		return DatabaseClosedError
-	}
-
-	database.activeGoroutineID.Store(currentGoroutineID)
-	transactionID := rand.Int63()
-	transaction := NewTransaction(transactionID, database, database.getCommittedState())
-
-	defer func() {
-		if transaction.IsActive() {
-			_ = transaction.Rollback()
-		}
-	}()
-
-	err = callback(transaction)
-	if err != nil {
-		if transaction.IsActive() {
-			_ = transaction.Rollback()
-		}
-		return err
-	}
-
-	if transaction.IsActive() {
-		return transaction.Commit()
-	}
-
-	return nil
+	defer cancelFunction()
+	return database.runTransaction(contextValue, func(contextValueInner context.Context, transaction *Transaction) error {
+		return callback(transaction)
+	})
 }
 
-func (database *Database) TransactionContext(ctx context.Context, callback func(ctx context.Context, transaction *Transaction) error) error {
-	if ctx.Value(txContextKey{}) != nil {
+func (database *Database) TransactionContext(parentContext context.Context, callback func(context.Context, *Transaction) error) error {
+	if parentContext.Value(transactionContextKey{}) != nil {
 		return NestedTransactionNotSupportedError
 	}
 
+	return database.runTransaction(parentContext, callback)
+}
+
+func (database *Database) runTransaction(contextValue context.Context, callback func(context.Context, *Transaction) error) error {
 	currentGoroutineID := getGoroutineID()
 	if database.activeGoroutineID.Load() == currentGoroutineID {
 		return NestedTransactionNotSupportedError
 	}
 
-	if err := database.lock(ctx); err != nil {
-		return err
+	actualError := database.lock(contextValue)
+	if actualError != nil {
+		if errors.Is(actualError, context.DeadlineExceeded) {
+			return TransactionWaitTimeoutError
+		}
+		return actualError
 	}
+
 	if database.closed.Load() {
 		database.unlock()
 		return DatabaseClosedError
 	}
+
 	database.activeGoroutineID.Store(currentGoroutineID)
 	transactionID := rand.Int63()
 	transaction := NewTransaction(transactionID, database, database.getCommittedState())
@@ -455,14 +445,13 @@ func (database *Database) TransactionContext(ctx context.Context, callback func(
 		}
 	}()
 
-	txCtx := context.WithValue(ctx, txContextKey{}, transaction)
-	error := callback(txCtx, transaction)
-	if error != nil {
-		// Rollback on callback error
+	newTransactionContext := context.WithValue(contextValue, transactionContextKey{}, transaction)
+	actualError = callback(newTransactionContext, transaction)
+	if actualError != nil {
 		if transaction.IsActive() {
 			_ = transaction.Rollback()
 		}
-		return error
+		return actualError
 	}
 
 	if transaction.IsActive() {
@@ -473,8 +462,8 @@ func (database *Database) TransactionContext(ctx context.Context, callback func(
 }
 
 func (database *Database) Close() error {
-	if err := database.lock(context.Background()); err != nil {
-		return err
+	if lockError := database.lock(context.Background()); lockError != nil {
+		return lockError
 	}
 	defer database.unlock()
 
@@ -492,8 +481,8 @@ func (database *Database) Close() error {
 }
 
 func (database *Database) Compact() error {
-	if err := database.lock(context.Background()); err != nil {
-		return err
+	if lockError := database.lock(context.Background()); lockError != nil {
+		return lockError
 	}
 	defer database.unlock()
 
@@ -1176,27 +1165,27 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 	}()
 
 	databaseState = NewDatabaseState(snapshotGen)
-	for _, snap := range tableSnapshots {
-		storagePath := filepath.Join(directory, snap.tableName+".db")
-		oldPath := filepath.Join(directory, snap.tableName+".db.old")
-		if _, err := os.Stat(storagePath); err == nil {
+	for _, snapshotInfo := range tableSnapshots {
+		storagePath := filepath.Join(directory, snapshotInfo.tableName+".db")
+		oldPath := filepath.Join(directory, snapshotInfo.tableName+".db.old")
+		if _, statError := os.Stat(storagePath); statError == nil {
 			_ = os.Remove(oldPath)
-			if err := os.Rename(storagePath, oldPath); err == nil {
-				renamedTables = append(renamedTables, snap.tableName)
+			if renameError := os.Rename(storagePath, oldPath); renameError == nil {
+				renamedTables = append(renamedTables, snapshotInfo.tableName)
 			}
 		}
 	}
 
-	for _, snap := range tableSnapshots {
-		tableStorageValue, error := database.getTableStorage(snap.tableName)
+	for _, snapshotInfo := range tableSnapshots {
+		tableStorageValue, error := database.getTableStorage(snapshotInfo.tableName)
 		if error != nil {
 			return nil, error
 		}
 
-		tableState := NewTableState(snap.tableName, snap.idType, snap.entityType, snap.indexMetas)
+		tableState := NewTableState(snapshotInfo.tableName, snapshotInfo.idType, snapshotInfo.entityType, snapshotInfo.indexMetas)
 
-		for _, recordBytes := range snap.recordBytes {
-			newRecordValue := reflect.New(snap.entityType)
+		for _, recordBytes := range snapshotInfo.recordBytes {
+			newRecordValue := reflect.New(snapshotInfo.entityType)
 			if error := Unmarshal(recordBytes, newRecordValue.Interface()); error != nil {
 				return nil, error
 			}
@@ -1209,7 +1198,7 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 			tableState.Insert(record, recordPointer)
 		}
 
-		databaseState.Tables[snap.tableName] = tableState
+		databaseState.Tables[snapshotInfo.tableName] = tableState
 	}
 
 	restoreSuccess = true

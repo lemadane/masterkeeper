@@ -6,28 +6,30 @@ import (
 )
 
 type transactionWaitTimeoutError struct {
-	err error
+	wrappedError error
 }
 
-func (e *transactionWaitTimeoutError) Error() string {
+func (timeoutError *transactionWaitTimeoutError) Error() string {
 	return "timed out waiting for transaction writer lock"
 }
 
-func (e *transactionWaitTimeoutError) Unwrap() error {
-	return e.err
+func (timeoutError *transactionWaitTimeoutError) Unwrap() error {
+	return timeoutError.wrappedError
 }
 
-func (e *transactionWaitTimeoutError) Is(target error) bool {
+func (timeoutError *transactionWaitTimeoutError) Is(target error) bool {
 	return target == TransactionWaitTimeoutError || target == context.DeadlineExceeded
 }
 
-var TransactionWaitTimeoutError error = &transactionWaitTimeoutError{err: context.DeadlineExceeded}
+var TransactionWaitTimeoutError error = &transactionWaitTimeoutError{wrappedError: context.DeadlineExceeded}
 
 var (
 	NotActiveTransactionError          = errors.New("transaction is not active")
 	NestedTransactionNotSupportedError = errors.New("nested write transactions are not supported")
 	DatabaseClosedError                = errors.New("database is closed")
 	RollbackOnlyTransactionError       = errors.New("transaction is marked as rollback-only")
+	InvalidTransactionWaitTimeoutError = errors.New("invalid transaction wait timeout")
+	InvalidTransactionContextError      = errors.New("invalid transaction context")
 )
 
 type DuplicateIndexError struct {

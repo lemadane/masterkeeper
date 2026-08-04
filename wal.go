@@ -286,8 +286,8 @@ func (walManager *WalManager) ReadAllRecords() ([]WalRecord, error) {
 			return nil, fmt.Errorf("corrupt WAL: invalid payload length %d", payloadLength)
 		}
 		currentOffset, _ := walManager.walFile.Seek(0, io.SeekCurrent)
-		fileInfo, err := walManager.walFile.Stat()
-		if err == nil {
+		fileInfo, statError := walManager.walFile.Stat()
+		if statError == nil {
 			remainingFileBytes := fileInfo.Size() - currentOffset
 			if int64(payloadLength) > remainingFileBytes {
 				// Torn write at the end of the file: break to stop reading, but don't return error

@@ -396,30 +396,30 @@ func TestSemanticInvalidSnapshotCorruptsDecodable(test *testing.T) {
 
 	// Locate the snapshot file and corrupt a record's tag or make it fail unmarshal
 	files, _ := os.ReadDir(tempDirectory)
-	var snapPath string
+	var snapshotPath string
 	for _, entry := range files {
 		if strings.HasPrefix(entry.Name(), "snapshot.") {
-			snapPath = filepath.Join(tempDirectory, entry.Name())
+			snapshotPath = filepath.Join(tempDirectory, entry.Name())
 			break
 		}
 	}
-	if snapPath != "" {
-		snapBytes, err := os.ReadFile(snapPath)
-		if err == nil {
+	if snapshotPath != "" {
+		snapshotBytes, operationError := os.ReadFile(snapshotPath)
+		if operationError == nil {
 			// Corrupt last 12 bytes of the payload (just before the 8-byte checksum)
-			if len(snapBytes) > 30 {
-				for i := len(snapBytes) - 20; i < len(snapBytes) - 8; i++ {
-					snapBytes[i] = 0xff
+			if len(snapshotBytes) > 30 {
+				for i := len(snapshotBytes) - 20; i < len(snapshotBytes) - 8; i++ {
+					snapshotBytes[i] = 0xff
 				}
 				
 				// Recompute CRC32
-				crcTable := crc32.MakeTable(crc32.Castagnoli)
-				hash := crc32.New(crcTable)
-				_, _ = hash.Write(snapBytes[:len(snapBytes)-8])
+				checksumTable := crc32.MakeTable(crc32.Castagnoli)
+				hash := crc32.New(checksumTable)
+				_, _ = hash.Write(snapshotBytes[:len(snapshotBytes)-8])
 				checksum := hash.Sum32()
 				
-				binary.BigEndian.PutUint64(snapBytes[len(snapBytes)-8:], uint64(checksum))
-				_ = os.WriteFile(snapPath, snapBytes, 0644)
+				binary.BigEndian.PutUint64(snapshotBytes[len(snapshotBytes)-8:], uint64(checksum))
+				_ = os.WriteFile(snapshotPath, snapshotBytes, 0644)
 			}
 		}
 	}
@@ -533,10 +533,10 @@ func TestCrossGoroutineNestedTransactionRejection(test *testing.T) {
 	}
 	defer database.Close()
 
-	testError = database.TransactionContext(context.Background(), func(ctx context.Context, outer *Transaction) error {
+	testError = database.TransactionContext(context.Background(), func(contextValue context.Context, outer *Transaction) error {
 		resultChan := make(chan error)
 		go func() {
-			resultChan <- database.TransactionContext(ctx, func(ctx context.Context, inner *Transaction) error {
+			resultChan <- database.TransactionContext(contextValue, func(contextValue context.Context, inner *Transaction) error {
 				return nil
 			})
 		}()
@@ -569,26 +569,26 @@ func TestLegacySnapshotMagicCompatibility(test *testing.T) {
 
 	// Locate snapshot and change magic to legacy SnapshotMagic (0x524d534e)
 	files, _ := os.ReadDir(tempDirectory)
-	var snapPath string
+	var snapshotPath string
 	for _, entry := range files {
 		if strings.HasPrefix(entry.Name(), "snapshot.") {
-			snapPath = filepath.Join(tempDirectory, entry.Name())
+			snapshotPath = filepath.Join(tempDirectory, entry.Name())
 			break
 		}
 	}
-	if snapPath != "" {
-		snapBytes, err := os.ReadFile(snapPath)
-		if err == nil && len(snapBytes) >= 20 {
-			binary.BigEndian.PutUint32(snapBytes[0:4], 0x524d534e)
+	if snapshotPath != "" {
+		snapshotBytes, operationError := os.ReadFile(snapshotPath)
+		if operationError == nil && len(snapshotBytes) >= 20 {
+			binary.BigEndian.PutUint32(snapshotBytes[0:4], 0x524d534e)
 
 			// Recompute CRC32
-			crcTable := crc32.MakeTable(crc32.Castagnoli)
-			hash := crc32.New(crcTable)
-			_, _ = hash.Write(snapBytes[:len(snapBytes)-8])
+			checksumTable := crc32.MakeTable(crc32.Castagnoli)
+			hash := crc32.New(checksumTable)
+			_, _ = hash.Write(snapshotBytes[:len(snapshotBytes)-8])
 			checksum := hash.Sum32()
-			binary.BigEndian.PutUint64(snapBytes[len(snapBytes)-8:], uint64(checksum))
+			binary.BigEndian.PutUint64(snapshotBytes[len(snapshotBytes)-8:], uint64(checksum))
 
-			_ = os.WriteFile(snapPath, snapBytes, 0644)
+			_ = os.WriteFile(snapshotPath, snapshotBytes, 0644)
 		}
 	}
 
@@ -677,22 +677,22 @@ func TestUnknownWALOperationRejection(test *testing.T) {
 
 	// Modify the operation type byte in the WAL to 0xFE (unknown type)
 	walPath := filepath.Join(tempDirectory, "wal.log")
-	walBytes, err := os.ReadFile(walPath)
-	if err == nil && len(walBytes) >= 30 {
-		walBytes[4] = 0xFE
+	walFileBytes, operationError := os.ReadFile(walPath)
+	if operationError == nil && len(walFileBytes) >= 30 {
+		walFileBytes[4] = 0xFE
 
 		// Recompute CRC32 checksum for the record
-		payloadLen := int32(binary.BigEndian.Uint32(walBytes[21:25]))
-		crcTable := crc32.MakeTable(crc32.Castagnoli)
-		hash := crc32.New(crcTable)
-		_, _ = hash.Write(walBytes[4:21]) // type, txID, gen
-		if payloadLen > 0 {
-			_, _ = hash.Write(walBytes[29 : 29+payloadLen])
+		payloadLength := int32(binary.BigEndian.Uint32(walFileBytes[21:25]))
+		checksumTable := crc32.MakeTable(crc32.Castagnoli)
+		hash := crc32.New(checksumTable)
+		_, _ = hash.Write(walFileBytes[4:21]) // type, transactionID, generation
+		if payloadLength > 0 {
+			_, _ = hash.Write(walFileBytes[29 : 29+payloadLength])
 		}
 		checksum := hash.Sum32()
-		binary.BigEndian.PutUint32(walBytes[25:29], checksum)
+		binary.BigEndian.PutUint32(walFileBytes[25:29], checksum)
 
-		_ = os.WriteFile(walPath, walBytes, 0644)
+		_ = os.WriteFile(walPath, walFileBytes, 0644)
 	}
 
 	// Reopen database should return a corruption/unknown operation type error!
@@ -720,5 +720,153 @@ func TestNilInterfaceEntityValidation(test *testing.T) {
 	_, testError = GetTable[string, any](database, "any_table")
 	if testError == nil || !errors.Is(testError, IncompatibleTypesError) {
 		test.Errorf("expected IncompatibleTypesError for interface entity type, got: %v", testError)
+	}
+}
+
+func TestAlreadyCancelledContext(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-cancelled-context-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	cancelledContext, cancelFunction := context.WithCancel(context.Background())
+	cancelFunction()
+
+	runCount := 0
+	testError = database.TransactionContext(cancelledContext, func(contextValue context.Context, transaction *Transaction) error {
+		runCount++
+		return nil
+	})
+
+	if !errors.Is(testError, context.Canceled) {
+		test.Errorf("expected context.Canceled, got: %v", testError)
+	}
+	if runCount != 0 {
+		test.Errorf("expected callback not to run, but it ran %d times", runCount)
+	}
+}
+
+func TestNegativeTimeout(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-negative-timeout-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.TransactionWaitTimeout = -1 * time.Second
+
+	_, testError = Open(tempDirectory, options)
+	if !errors.Is(testError, InvalidTransactionWaitTimeoutError) {
+		test.Errorf("expected InvalidTransactionWaitTimeoutError, got: %v", testError)
+	}
+}
+
+func TestZeroTimeout(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-zero-timeout-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.TransactionWaitTimeout = 0 // Wait indefinitely
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	// Acquire lock and hold it for a short duration in a transaction
+	lockAcquired := make(chan struct{})
+	doneChannel := make(chan error)
+	go func() {
+		doneChannel <- database.Transaction(func(outer *Transaction) error {
+			close(lockAcquired)
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		})
+	}()
+
+	<-lockAcquired
+	// The next transaction should block until the first one releases the lock
+	testError = database.Transaction(func(inner *Transaction) error {
+		return nil
+	})
+
+	if testError != nil {
+		test.Errorf("expected second transaction to succeed after first releases lock, got: %v", testError)
+	}
+	if firstError := <-doneChannel; firstError != nil {
+		test.Errorf("expected first transaction to succeed, got: %v", firstError)
+	}
+}
+
+func TestTimedOutWaiterLockIntegrity(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-waiter-integrity-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	customerTable, _ := GetTable[string, IssueCustomer](database, "customers")
+
+	// 1. Acquire the lock and hold it
+	lockAcquired := make(chan struct{})
+	releaseLock := make(chan struct{})
+	doneChannel := make(chan error)
+	go func() {
+		doneChannel <- database.Transaction(func(outer *Transaction) error {
+			close(lockAcquired)
+			<-releaseLock
+			return customerTable.Insert(outer, IssueCustomer{ID: "c1", Name: "Alice"})
+		})
+	}()
+
+	<-lockAcquired
+
+	// 2. Start a transaction that will time out waiting for the lock
+	timeoutContext, cancelFunction := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancelFunction()
+
+	timedOutError := database.TransactionContext(timeoutContext, func(contextValue context.Context, inner *Transaction) error {
+		return nil
+	})
+
+	if !errors.Is(timedOutError, context.DeadlineExceeded) {
+		test.Errorf("expected context.DeadlineExceeded, got: %v", timedOutError)
+	}
+
+	// 3. Release the lock and verify that the original transaction completes successfully
+	close(releaseLock)
+	if firstError := <-doneChannel; firstError != nil {
+		test.Errorf("expected original transaction to succeed, got: %v", firstError)
+	}
+
+	// 4. Verify that data inserted by the original transaction is visible and intact
+	customer, found, findError := customerTable.FindByID(nil, "c1")
+	if findError != nil {
+		test.Fatalf("failed to query customer: %v", findError)
+	}
+	if !found || customer.Name != "Alice" {
+		test.Errorf("expected customer to be Alice, found: %v, customer: %v", found, customer)
 	}
 }
