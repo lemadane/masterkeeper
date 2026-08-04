@@ -187,14 +187,20 @@ func writeValue(w io.Writer, val reflect.Value) error {
 		}
 		return writeStructFields(w, val)
 
-	case reflect.Int, reflect.Int32, reflect.Int16, reflect.Int8:
-		if err := binary.Write(w, binary.BigEndian, byte(4)); err != nil { // TAG_INT32
+	case reflect.Int:
+		if err := binary.Write(w, binary.BigEndian, byte(5)); err != nil {
+			return err
+		}
+		return binary.Write(w, binary.BigEndian, val.Int())
+
+	case reflect.Int8, reflect.Int16, reflect.Int32:
+		if err := binary.Write(w, binary.BigEndian, byte(4)); err != nil {
 			return err
 		}
 		return binary.Write(w, binary.BigEndian, int32(val.Int()))
 
 	case reflect.Int64:
-		if err := binary.Write(w, binary.BigEndian, byte(5)); err != nil { // TAG_INT64
+		if err := binary.Write(w, binary.BigEndian, byte(5)); err != nil {
 			return err
 		}
 		return binary.Write(w, binary.BigEndian, val.Int())
@@ -302,6 +308,37 @@ func readValue(r io.Reader) (any, error) {
 	}
 }
 
+func castSignedInteger(value any, targetType reflect.Type) (reflect.Value, error) {
+	var number int64
+
+	switch v := value.(type) {
+	case int32:
+		number = int64(v)
+	case int64:
+		number = v
+	case int:
+		number = int64(v)
+	default:
+		return reflect.Value{}, fmt.Errorf(
+			"cannot cast %T to %s",
+			value,
+			targetType,
+		)
+	}
+
+	result := reflect.New(targetType).Elem()
+	if result.OverflowInt(number) {
+		return reflect.Value{}, fmt.Errorf(
+			"integer %d overflows %s",
+			number,
+			targetType,
+		)
+	}
+
+	result.SetInt(number)
+	return result, nil
+}
+
 func castValue(val any, targetType reflect.Type) (reflect.Value, error) {
 	if val == nil {
 		return reflect.Zero(targetType), nil
@@ -348,44 +385,12 @@ func castValue(val any, targetType reflect.Type) (reflect.Value, error) {
 		}
 		return returnVal(reflect.ValueOf(str), isPtr), nil
 
-	case reflect.Int32:
-		var i int32
-		if v, ok := val.(int32); ok {
-			i = v
-		} else if v, ok := val.(int64); ok {
-			i = int32(v)
-		} else if v, ok := val.(float64); ok {
-			i = int32(v)
-		} else if v, ok := val.(int); ok {
-			i = int32(v)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		result, err := castSignedInteger(val, baseType)
+		if err != nil {
+			return reflect.Value{}, err
 		}
-		return returnVal(reflect.ValueOf(i), isPtr), nil
-
-	case reflect.Int:
-		var i int
-		if v, ok := val.(int); ok {
-			i = v
-		} else if v, ok := val.(int32); ok {
-			i = int(v)
-		} else if v, ok := val.(int64); ok {
-			i = int(v)
-		} else if v, ok := val.(float64); ok {
-			i = int(v)
-		}
-		return returnVal(reflect.ValueOf(i), isPtr), nil
-
-	case reflect.Int64:
-		var i int64
-		if v, ok := val.(int64); ok {
-			i = v
-		} else if v, ok := val.(int32); ok {
-			i = int64(v)
-		} else if v, ok := val.(int); ok {
-			i = int64(v)
-		} else if v, ok := val.(float64); ok {
-			i = int64(v)
-		}
-		return returnVal(reflect.ValueOf(i), isPtr), nil
+		return returnVal(result, isPtr), nil
 
 	case reflect.Float64:
 		var f float64

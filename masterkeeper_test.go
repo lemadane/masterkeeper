@@ -3,9 +3,11 @@ package masterkeeper_test
 import (
 	"fmt"
 	keeper "github.com/lemadane/masterkeeper"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -603,5 +605,244 @@ func TestHotBackup(t *testing.T) {
 	}
 	if c2Back.Name != "Bob" || c2Back.Age != 35 {
 		t.Errorf("incorrect data in backup customer c2: %+v", c2Back)
+	}
+}
+
+type BigIntIDRecord struct {
+	ID   int `keeper:"id"`
+	Name string
+}
+
+func TestInt64SerializationRegression(t *testing.T) {
+	testValues := []int{
+		math.MaxInt,
+		math.MinInt,
+		int(1 << 40),
+		int(-(1 << 40)),
+		math.MaxInt32,
+		math.MinInt32,
+	}
+
+	for _, val := range testValues {
+		t.Run(fmt.Sprintf("val_%d", val), func(t *testing.T) {
+			tempDir, err := os.MkdirTemp("", "keeper-test-int64-*")
+			if err != nil {
+				t.Fatalf("failed to create temp dir: %v", err)
+			}
+			defer os.RemoveAll(tempDir)
+
+			opts := keeper.DefaultOptions()
+			opts.RegisterTypes(BigIntIDRecord{})
+
+			// 1. Open Database
+			db, err := keeper.Open(tempDir, opts)
+			if err != nil {
+				t.Fatalf("failed to open database: %v", err)
+			}
+
+			table, err := keeper.GetTable[int, BigIntIDRecord](db, "big_ints")
+			if err != nil {
+				db.Close()
+				t.Fatalf("failed to get table: %v", err)
+			}
+
+			// 2. Insert record
+			rec := BigIntIDRecord{
+				ID:   val,
+				Name: "TestRecord",
+			}
+			err = table.Insert(nil, rec)
+			if err != nil {
+				db.Close()
+				t.Fatalf("failed to insert: %v", err)
+			}
+
+			// 3. Close database
+			db.Close()
+
+			// 4. Reopen database
+			db2, err := keeper.Open(tempDir, opts)
+			if err != nil {
+				t.Fatalf("failed to reopen database: %v", err)
+			}
+			defer db2.Close()
+
+			table2, err := keeper.GetTable[int, BigIntIDRecord](db2, "big_ints")
+			if err != nil {
+				t.Fatalf("failed to get table: %v", err)
+			}
+
+			// 5. Find by original ID
+			got, found, err := table2.FindByID(nil, val)
+			if err != nil {
+				t.Fatalf("failed to find record: %v", err)
+			}
+			if !found {
+				t.Fatalf("record not found")
+			}
+
+			// Verify decoded ID is unchanged
+			if got.ID != val {
+				t.Errorf("expected ID %d, got %d", val, got.ID)
+			}
+
+			// 6. Test update and deletion using that ID
+			got.Name = "UpdatedRecord"
+			err = table2.Update(nil, got)
+			if err != nil {
+				t.Fatalf("failed to update record: %v", err)
+			}
+
+			gotUpdated, foundUpdated, err := table2.FindByID(nil, val)
+			if err != nil {
+				t.Fatalf("failed to find updated record: %v", err)
+			}
+			if !foundUpdated || gotUpdated.Name != "UpdatedRecord" {
+				t.Fatalf("update not reflected or record lost: found=%v, name=%s", foundUpdated, gotUpdated.Name)
+			}
+
+			deleted, err := table2.DeleteByID(nil, val)
+			if err != nil {
+				t.Fatalf("failed to delete record: %v", err)
+			}
+			if !deleted {
+				t.Fatalf("expected delete to return true")
+			}
+
+			_, foundDeleted, err := table2.FindByID(nil, val)
+			if err != nil {
+				t.Fatalf("failed to find deleted record: %v", err)
+			}
+			if foundDeleted {
+				t.Fatalf("record still exists after deletion")
+			}
+
+			// 7. Confirm overflow into int8, int16, or int32 returns an error
+			type LargeValStruct struct {
+				Val int
+			}
+			data, err := keeper.Marshal(LargeValStruct{Val: val})
+			if err != nil {
+				t.Fatalf("failed to marshal large val struct: %v", err)
+			}
+
+			// Check int8 overflow
+			if val < math.MinInt8 || val > math.MaxInt8 {
+				var t8 struct{ Val int8 }
+				err8 := keeper.Unmarshal(data, &t8)
+				if err8 == nil {
+					t.Errorf("expected overflow error casting %d to int8, but got nil", val)
+				} else if !strings.Contains(err8.Error(), "overflows") {
+					t.Errorf("expected error message to contain 'overflows', got: %v", err8)
+				}
+			}
+
+			// Check int16 overflow
+			if val < math.MinInt16 || val > math.MaxInt16 {
+				var t16 struct{ Val int16 }
+				err16 := keeper.Unmarshal(data, &t16)
+				if err16 == nil {
+					t.Errorf("expected overflow error casting %d to int16, but got nil", val)
+				} else if !strings.Contains(err16.Error(), "overflows") {
+					t.Errorf("expected error message to contain 'overflows', got: %v", err16)
+				}
+			}
+
+			// Check int32 overflow
+			if val < math.MinInt32 || val > math.MaxInt32 {
+				var t32 struct{ Val int32 }
+				err32 := keeper.Unmarshal(data, &t32)
+				if err32 == nil {
+					t.Errorf("expected overflow error casting %d to int32, but got nil", val)
+				} else if !strings.Contains(err32.Error(), "overflows") {
+					t.Errorf("expected error message to contain 'overflows', got: %v", err32)
+				}
+			}
+		})
+	}
+}
+
+type UserID int
+
+type UserRecord struct {
+	ID   UserID `keeper:"id"`
+	Name string
+}
+
+func TestInt64E2E(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "keeper-test-e2e-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	opts := keeper.DefaultOptions()
+	opts.RegisterTypes(UserRecord{})
+
+	db, err := keeper.Open(tempDir, opts)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+
+	table, err := keeper.GetTable[UserID, UserRecord](db, "users")
+	if err != nil {
+		db.Close()
+		t.Fatalf("failed to get table: %v", err)
+	}
+
+	// Test named type values
+	val := UserID(1 << 40)
+	err = table.Insert(nil, UserRecord{ID: val, Name: "Alice"})
+	if err != nil {
+		db.Close()
+		t.Fatalf("failed to insert: %v", err)
+	}
+
+	db.Close()
+
+	// Reopen
+	db2, err := keeper.Open(tempDir, opts)
+	if err != nil {
+		t.Fatalf("failed to reopen database: %v", err)
+	}
+	defer db2.Close()
+
+	table2, err := keeper.GetTable[UserID, UserRecord](db2, "users")
+	if err != nil {
+		t.Fatalf("failed to get table: %v", err)
+	}
+
+	got, found, err := table2.FindByID(nil, val)
+	if err != nil {
+		t.Fatalf("failed to find: %v", err)
+	}
+	if !found {
+		t.Fatalf("not found")
+	}
+	if got.ID != val || got.Name != "Alice" {
+		t.Errorf("unexpected record: %+v", got)
+	}
+
+	// Update
+	got.Name = "Bob"
+	err = table2.Update(nil, got)
+	if err != nil {
+		t.Fatalf("failed to update: %v", err)
+	}
+
+	got2, found2, _ := table2.FindByID(nil, val)
+	if !found2 || got2.Name != "Bob" {
+		t.Errorf("update failed")
+	}
+
+	// Delete
+	deleted, err := table2.DeleteByID(nil, val)
+	if err != nil || !deleted {
+		t.Fatalf("failed to delete")
+	}
+
+	_, found3, _ := table2.FindByID(nil, val)
+	if found3 {
+		t.Errorf("record still exists after delete")
 	}
 }
