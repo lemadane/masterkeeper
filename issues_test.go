@@ -870,3 +870,26 @@ func TestTimedOutWaiterLockIntegrity(test *testing.T) {
 		test.Errorf("expected customer to be Alice, found: %v, customer: %v", found, customer)
 	}
 }
+
+func TestNilTransactionContextRejection(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-nil-context-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	testError = database.TransactionContext(nil, func(contextValue context.Context, transaction *Transaction) error {
+		return nil
+	})
+
+	if !errors.Is(testError, InvalidTransactionContextError) {
+		test.Errorf("expected InvalidTransactionContextError for nil context, got: %v", testError)
+	}
+}

@@ -409,6 +409,10 @@ func (database *Database) Transaction(callback func(transaction *Transaction) er
 }
 
 func (database *Database) TransactionContext(parentContext context.Context, callback func(context.Context, *Transaction) error) error {
+	if parentContext == nil {
+		return InvalidTransactionContextError
+	}
+
 	if parentContext.Value(transactionContextKey{}) != nil {
 		return NestedTransactionNotSupportedError
 	}
