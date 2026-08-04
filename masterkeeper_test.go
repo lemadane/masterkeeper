@@ -846,3 +846,69 @@ func TestInt64E2E(testingT *testing.T) {
 		testingT.Errorf("record still exists after delete")
 	}
 }
+
+func TestTransactionAfterCloseDeadlock(testingT *testing.T) {
+	tempDir, err := os.MkdirTemp("", "keeper-test-deadlock-*")
+	if err != nil {
+		testingT.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(UserRecord{})
+
+	database, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to open database: %v", err)
+	}
+
+	table, err := keeper.GetTable[UserID, UserRecord](database, "users")
+	if err != nil {
+		database.Close()
+		testingT.Fatalf("failed to get table: %v", err)
+	}
+
+	// Close database
+	if err := database.Close(); err != nil {
+		testingT.Fatalf("failed to close database: %v", err)
+	}
+
+	// 1. Transaction should return ErrClosed
+	err = database.Transaction(func(transaction *keeper.Transaction) error {
+		return nil
+	})
+	if err != keeper.ErrClosed {
+		testingT.Errorf("expected ErrClosed on Transaction, got: %v", err)
+	}
+
+	// 2. Insert should return ErrClosed
+	err = table.Insert(nil, UserRecord{ID: 1, Name: "Alice"})
+	if err != keeper.ErrClosed {
+		testingT.Errorf("expected ErrClosed on Insert, got: %v", err)
+	}
+
+	// 3. Update should return ErrClosed
+	err = table.Update(nil, UserRecord{ID: 1, Name: "Bob"})
+	if err != keeper.ErrClosed {
+		testingT.Errorf("expected ErrClosed on Update, got: %v", err)
+	}
+
+	// 4. DeleteByID should return ErrClosed
+	_, err = table.DeleteByID(nil, UserID(1))
+	if err != keeper.ErrClosed {
+		testingT.Errorf("expected ErrClosed on DeleteByID, got: %v", err)
+	}
+
+	// 5. Compact should return ErrClosed
+	err = database.Compact()
+	if err != keeper.ErrClosed {
+		testingT.Errorf("expected ErrClosed on Compact, got: %v", err)
+	}
+
+	// 6. Backup should return ErrClosed
+	err = database.Backup(filepath.Join(tempDir, "backup"))
+	if err != keeper.ErrClosed {
+		testingT.Errorf("expected ErrClosed on Backup, got: %v", err)
+	}
+}
+

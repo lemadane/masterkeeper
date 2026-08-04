@@ -105,7 +105,16 @@ func NewWalManager(directory string, durability DurabilityMode, tableStorageReso
 }
 
 func (walManager *WalManager) Submit(task *WriteTask) {
-	walManager.writeQueue <- task
+	select {
+	case <-walManager.closeChan:
+		task.Done <- WriteResult{Err: ErrClosed}
+	default:
+		select {
+		case <-walManager.closeChan:
+			task.Done <- WriteResult{Err: ErrClosed}
+		case walManager.writeQueue <- task:
+		}
+	}
 }
 
 func (walManager *WalManager) Close() error {

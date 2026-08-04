@@ -164,6 +164,10 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
 
+	if database.closed {
+		return ErrClosed
+	}
+
 	// Double check
 	if _, found := database.tableMetadataMap.Load(tableName); found {
 		return nil
@@ -266,6 +270,10 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
 
+	if database.closed {
+		return false, ErrClosed
+	}
+
 	committed := database.getCommittedState()
 	if _, found := committed.Tables[tableName]; !found {
 		return false, nil
@@ -314,6 +322,10 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 
 func (database *Database) Transaction(callback func(transaction *Transaction) error) error {
 	database.writeLock.Lock()
+	if database.closed {
+		database.writeLock.Unlock()
+		return ErrClosed
+	}
 	txID := rand.Int63()
 	transaction := NewTransaction(txID, database, database.getCommittedState())
 
@@ -340,6 +352,9 @@ func (database *Database) Transaction(callback func(transaction *Transaction) er
 }
 
 func (database *Database) Close() error {
+	database.writeLock.Lock()
+	defer database.writeLock.Unlock()
+
 	if database.closed {
 		return nil
 	}
@@ -357,6 +372,10 @@ func (database *Database) Close() error {
 func (database *Database) Compact() error {
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
+
+	if database.closed {
+		return ErrClosed
+	}
 
 	committed := database.getCommittedState()
 	// 1. Write snapshot
@@ -1080,6 +1099,10 @@ func (database *Database) ImportJSON(sourcePath string) error {
 func (database *Database) Backup(backupDirectory string) error {
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
+
+	if database.closed {
+		return ErrClosed
+	}
 
 	if err := os.MkdirAll(backupDirectory, 0755); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
