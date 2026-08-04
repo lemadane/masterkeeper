@@ -1207,6 +1207,45 @@ func TestQueryAfterClearE2E(testingT *testing.T) {
 	}
 }
 
+func TestNegativeOffsetPrevention(testingT *testing.T) {
+	tempDir, err := os.MkdirTemp("", "keeper-test-offset-*")
+	if err != nil {
+		testingT.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
+
+	database, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
+	if err != nil {
+		testingT.Fatalf("failed to get table: %v", err)
+	}
+
+	// Insert test records
+	_ = customerTable.Insert(nil, Customer{ID: "cust_1", Name: "Alice", Email: "alice@example.com", Age: 30})
+	_ = customerTable.Insert(nil, Customer{ID: "cust_2", Name: "Bob", Email: "bob@example.com", Age: 25})
+
+	// Query with negative offset
+	results, err := customerTable.Query(nil).
+		Offset(-1).
+		List()
+	if err != nil {
+		testingT.Fatalf("query failed: %v", err)
+	}
+
+	if len(results) != 2 {
+		testingT.Errorf("expected 2 records, got: %d", len(results))
+	}
+}
+
+
 
 
 

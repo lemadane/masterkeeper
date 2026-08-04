@@ -157,7 +157,11 @@ func (query *Query[T]) Limit(limit int) *Query[T] {
 }
 
 func (query *Query[T]) Offset(offset int) *Query[T] {
-	query.offset = offset
+	if offset < 0 {
+		query.offset = 0
+	} else {
+		query.offset = offset
+	}
 	return query
 }
 
