@@ -1245,6 +1245,80 @@ func TestNegativeOffsetPrevention(test *testing.T) {
 	}
 }
 
+func TestConcurrentReadClose(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-read-close-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
+
+	database, testError := keeper.Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+
+	customerTable, testError := keeper.GetTable[string, Customer](database, "customers")
+	if testError != nil {
+		database.Close()
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	// Insert initial record
+	_ = customerTable.Insert(nil, Customer{ID: "c1", Name: "Alice", Age: 30})
+
+	var wg sync.WaitGroup
+	concurrencyLimit := 10
+
+	// Spawn multiple concurrent reader goroutines
+	for i := 0; i < concurrencyLimit; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				_, _, testError := customerTable.FindByID(nil, "c1")
+				if testError != nil {
+					if testError == keeper.DatabaseClosedError {
+						return // database closed successfully
+					}
+				}
+			}
+		}()
+	}
+
+	// Spawn multiple concurrent writer goroutines
+	for i := 0; i < concurrencyLimit; i++ {
+		wg.Add(1)
+		go func(workerIndex int) {
+			defer wg.Done()
+			for j := 0; ; j++ {
+				testError := database.Transaction(func(tx *keeper.Transaction) error {
+					return customerTable.Insert(tx, Customer{
+						ID:   fmt.Sprintf("w_%d_%d", workerIndex, j),
+						Name: "ActiveUser",
+						Age:  20 + j,
+					})
+				})
+				if testError != nil {
+					if testError == keeper.DatabaseClosedError || strings.Contains(testError.Error(), "closed") {
+						return // database closed successfully
+					}
+				}
+			}
+		}(i)
+	}
+
+	// Let readers and writers saturate the database, then close it
+	time.Sleep(10 * time.Millisecond)
+	if testError := database.Close(); testError != nil {
+		test.Errorf("failed to close database: %v", testError)
+	}
+
+	wg.Wait()
+}
+
 
 
 

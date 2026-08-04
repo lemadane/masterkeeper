@@ -50,7 +50,7 @@ type Database struct {
 	committedState       atomic.Pointer[DatabaseState]
 	tableMetadataMap     sync.Map // tableName -> TableMetadata
 	tableStorageMap      sync.Map // tableName -> *TableStorage
-	closed               bool
+	closed               atomic.Bool
 	databaseID           int64
 	lastFlushError       error
 	lastFlushErrorMutex  sync.RWMutex
@@ -126,7 +126,7 @@ func (database *Database) currentGeneration() int64 {
 }
 
 func (database *Database) getTableStorage(tableName string) (*TableStorage, error) {
-	if database.closed {
+	if database.closed.Load() {
 		return nil, DatabaseClosedError
 	}
 
@@ -173,7 +173,7 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
 
-	if database.closed {
+	if database.closed.Load() {
 		return DatabaseClosedError
 	}
 
@@ -284,7 +284,7 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
 
-	if database.closed {
+	if database.closed.Load() {
 		return false, DatabaseClosedError
 	}
 
@@ -340,7 +340,7 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 
 func (database *Database) Transaction(callback func(transaction *Transaction) error) error {
 	database.writeLock.Lock()
-	if database.closed {
+	if database.closed.Load() {
 		database.writeLock.Unlock()
 		return DatabaseClosedError
 	}
@@ -373,10 +373,9 @@ func (database *Database) Close() error {
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
 
-	if database.closed {
+	if database.closed.Swap(true) {
 		return nil
 	}
-	database.closed = true
 
 	database.tableStorageMap.Range(func(key, value any) bool {
 		tableStorageValue := value.(*TableStorage)
@@ -391,7 +390,7 @@ func (database *Database) Compact() error {
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
 
-	if database.closed {
+	if database.closed.Load() {
 		return DatabaseClosedError
 	}
 
@@ -1132,7 +1131,7 @@ func (database *Database) Backup(backupDirectory string) error {
 	database.writeLock.Lock()
 	defer database.writeLock.Unlock()
 
-	if database.closed {
+	if database.closed.Load() {
 		return DatabaseClosedError
 	}
 

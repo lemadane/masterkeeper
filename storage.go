@@ -52,6 +52,10 @@ func (tableStorage *TableStorage) AppendRecord(bytesValue []byte) (RecordPointer
 	tableStorage.mu.Lock()
 	defer tableStorage.mu.Unlock()
 
+	if tableStorage.file == nil {
+		return RecordPointer{}, DatabaseClosedError
+	}
+
 	offset := tableStorage.currentSize
 	written, error := tableStorage.file.WriteAt(bytesValue, offset)
 	if error != nil {
@@ -69,6 +73,10 @@ func (tableStorage *TableStorage) AppendRecord(bytesValue []byte) (RecordPointer
 func (tableStorage *TableStorage) AppendRecords(recordsSlice [][]byte) ([]RecordPointer, error) {
 	tableStorage.mu.Lock()
 	defer tableStorage.mu.Unlock()
+
+	if tableStorage.file == nil {
+		return nil, DatabaseClosedError
+	}
 
 	var totalSize int
 	for _, recordBytes := range recordsSlice {
@@ -100,6 +108,13 @@ func (tableStorage *TableStorage) AppendRecords(recordsSlice [][]byte) ([]Record
 }
 
 func (tableStorage *TableStorage) ReadRecord(recordPointer RecordPointer) ([]byte, error) {
+	tableStorage.mu.Lock()
+	defer tableStorage.mu.Unlock()
+
+	if tableStorage.file == nil {
+		return nil, DatabaseClosedError
+	}
+
 	buffer := make([]byte, recordPointer.Size)
 	_, error := tableStorage.file.ReadAt(buffer, recordPointer.Offset)
 	if error != nil {
@@ -125,6 +140,10 @@ func (tableStorage *TableStorage) Close() error {
 func (tableStorage *TableStorage) Compact(activePointers map[any]RecordPointer) error {
 	tableStorage.mu.Lock()
 	defer tableStorage.mu.Unlock()
+
+	if tableStorage.file == nil {
+		return DatabaseClosedError
+	}
 
 	compactPath := tableStorage.tablePath + ".compact"
 	_ = os.Remove(compactPath)
