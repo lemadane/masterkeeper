@@ -19,23 +19,23 @@ const (
 )
 
 // Migrate exports all tables, schemas, and records from the Database to a SQL database.
-func Migrate(db *Database, sqlDB *sql.DB, dialect SQLDialect) error {
-	if db == nil {
+func Migrate(database *Database, sqlDatabase *sql.DB, dialect SQLDialect) error {
+	if database == nil {
 		return fmt.Errorf("masterkeeper database cannot be nil")
 	}
-	if sqlDB == nil {
+	if sqlDatabase == nil {
 		return fmt.Errorf("sql database connection cannot be nil")
 	}
 
-	committed := db.getCommittedState()
-	for tableName, ts := range committed.Tables {
-		storage, err := db.getTableStorage(tableName)
+	committed := database.getCommittedState()
+	for tableName, tableState := range committed.Tables {
+		tableStorageVal, err := database.getTableStorage(tableName)
 		if err != nil {
 			return err
 		}
 
 		// 1. Reflect EntityType fields to construct column definitions
-		entityType := ts.EntityType
+		entityType := tableState.EntityType
 		if entityType.Kind() != reflect.Struct {
 			return fmt.Errorf("entity type for table %s must be a struct", tableName)
 		}
@@ -45,22 +45,22 @@ func Migrate(db *Database, sqlDB *sql.DB, dialect SQLDialect) error {
 		var columnDefs []string
 		var fieldNames []string
 
-		for i := 0; i < entityType.NumField(); i++ {
-			field := entityType.Field(i)
-			fieldName := getFieldName(field)
-			meta := parseFieldTag(field)
+		for index := 0; index < entityType.NumField(); index++ {
+			structField := entityType.Field(index)
+			fieldName := getFieldName(structField)
+			fieldMetadata := parseFieldTag(structField)
 
-			colType := mapGoTypeToSQL(field.Type, dialect)
+			colType := mapGoTypeToSQL(structField.Type, dialect)
 			colDef := quoteIdentifier(fieldName, dialect) + " " + colType
 
-			if meta.IsID {
+			if fieldMetadata.IsID {
 				colDef += " PRIMARY KEY"
 			}
 
 			columnDefs = append(columnDefs, colDef)
 			columns = append(columns, fieldName)
 			quotedColumns = append(quotedColumns, quoteIdentifier(fieldName, dialect))
-			fieldNames = append(fieldNames, field.Name)
+			fieldNames = append(fieldNames, structField.Name)
 		}
 
 		// 2. Create the Table
@@ -79,21 +79,21 @@ END`, tableName, quoteIdentifier(tableName, dialect), strings.Join(columnDefs, "
 			)
 		}
 
-		if _, err := sqlDB.Exec(createTableSQL); err != nil {
+		if _, err := sqlDatabase.Exec(createTableSQL); err != nil {
 			return fmt.Errorf("failed to create table %s: %w", tableName, err)
 		}
 
 		// 3. Create Indexes
-		for _, meta := range ts.IndexMetadataList {
+		for _, indexMetadata := range tableState.IndexMetadataList {
 			// Primary key does not need secondary index
-			if strings.ToLower(meta.FieldName) == "id" {
+			if strings.ToLower(indexMetadata.FieldName) == "id" {
 				continue
 			}
 
-			indexName := meta.IndexName
+			indexName := indexMetadata.IndexName
 			var indexSQL string
 			uniqueKeyword := ""
-			if meta.Unique {
+			if indexMetadata.Unique {
 				uniqueKeyword = "UNIQUE "
 			}
 
@@ -107,25 +107,25 @@ END`,
 					uniqueKeyword,
 					quoteIdentifier(indexName, dialect),
 					quoteIdentifier(tableName, dialect),
-					quoteIdentifier(meta.FieldName, dialect),
+					quoteIdentifier(indexMetadata.FieldName, dialect),
 				)
 			} else if dialect == DialectPostgreSQL || dialect == DialectSQLite {
 				indexSQL = fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)",
 					uniqueKeyword,
 					quoteIdentifier(indexName, dialect),
 					quoteIdentifier(tableName, dialect),
-					quoteIdentifier(meta.FieldName, dialect),
+					quoteIdentifier(indexMetadata.FieldName, dialect),
 				)
 			} else { // DialectMySQL
 				indexSQL = fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
 					uniqueKeyword,
 					quoteIdentifier(indexName, dialect),
 					quoteIdentifier(tableName, dialect),
-					quoteIdentifier(meta.FieldName, dialect),
+					quoteIdentifier(indexMetadata.FieldName, dialect),
 				)
 			}
 
-			_, err := sqlDB.Exec(indexSQL)
+			_, err := sqlDatabase.Exec(indexSQL)
 			if err != nil {
 				// For MySQL, catch "Duplicate key name" error (ErrorCode 1061)
 				if dialect == DialectMySQL && (strings.Contains(err.Error(), "1061") || strings.Contains(strings.ToLower(err.Error()), "duplicate key name")) {
@@ -138,16 +138,16 @@ END`,
 
 		// 4. Retrieve and Insert Records
 		var records []any
-		for _, ptr := range ts.RecordPointers {
-			bytes, err := storage.ReadRecord(ptr)
+		for _, recordPointer := range tableState.RecordPointers {
+			bytesValue, err := tableStorageVal.ReadRecord(recordPointer)
 			if err != nil {
 				return fmt.Errorf("failed to read record from table %s: %w", tableName, err)
 			}
-			newRecordVal := reflect.New(ts.EntityType)
-			if err := Unmarshal(bytes, newRecordVal.Interface()); err != nil {
+			newRecordValue := reflect.New(tableState.EntityType)
+			if err := Unmarshal(bytesValue, newRecordValue.Interface()); err != nil {
 				return fmt.Errorf("failed to unmarshal record from table %s: %w", tableName, err)
 			}
-			records = append(records, newRecordVal.Elem().Interface())
+			records = append(records, newRecordValue.Elem().Interface())
 		}
 
 		if len(records) == 0 {
@@ -156,12 +156,12 @@ END`,
 
 		// Prepare placeholders
 		var placeholders []string
-		for i := range columns {
-			placeholders = append(placeholders, getPlaceholder(dialect, i+1))
+		for index := range columns {
+			placeholders = append(placeholders, getPlaceholder(dialect, index+1))
 		}
 
 		// Execute insertions in a transaction
-		tx, err := sqlDB.Begin()
+		sqlTransaction, err := sqlDatabase.Begin()
 		if err != nil {
 			return fmt.Errorf("failed to begin SQL transaction for table %s: %w", tableName, err)
 		}
@@ -172,34 +172,34 @@ END`,
 			strings.Join(placeholders, ", "),
 		)
 
-		stmt, err := tx.Prepare(insertSQL)
+		sqlStatement, err := sqlTransaction.Prepare(insertSQL)
 		if err != nil {
-			tx.Rollback()
+			sqlTransaction.Rollback()
 			return fmt.Errorf("failed to prepare insert statement for table %s: %w", tableName, err)
 		}
 
 		for _, record := range records {
-			val := reflect.ValueOf(record)
+			reflectValue := reflect.ValueOf(record)
 			var args []any
 			for _, fName := range fieldNames {
-				fieldVal := val.FieldByName(fName)
-				boundVal, err := bindValue(fieldVal, dialect)
+				fieldVal := reflectValue.FieldByName(fName)
+				boundValue, err := bindValue(fieldVal, dialect)
 				if err != nil {
-					stmt.Close()
-					tx.Rollback()
+					sqlStatement.Close()
+					sqlTransaction.Rollback()
 					return fmt.Errorf("failed to bind field value in table %s: %w", tableName, err)
 				}
-				args = append(args, boundVal)
+				args = append(args, boundValue)
 			}
-			if _, err := stmt.Exec(args...); err != nil {
-				stmt.Close()
-				tx.Rollback()
+			if _, err := sqlStatement.Exec(args...); err != nil {
+				sqlStatement.Close()
+				sqlTransaction.Rollback()
 				return fmt.Errorf("failed to insert record into table %s: %w", tableName, err)
 			}
 		}
 
-		stmt.Close()
-		if err := tx.Commit(); err != nil {
+		sqlStatement.Close()
+		if err := sqlTransaction.Commit(); err != nil {
 			return fmt.Errorf("failed to commit SQL transaction for table %s: %w", tableName, err)
 		}
 	}
@@ -229,12 +229,12 @@ func getPlaceholder(dialect SQLDialect, index int) string {
 	}
 }
 
-func mapGoTypeToSQL(t reflect.Type, dialect SQLDialect) string {
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
+func mapGoTypeToSQL(reflectType reflect.Type, dialect SQLDialect) string {
+	for reflectType.Kind() == reflect.Ptr {
+		reflectType = reflectType.Elem()
 	}
 
-	switch t.Kind() {
+	switch reflectType.Kind() {
 	case reflect.String:
 		if dialect == DialectSQLite {
 			return "TEXT"
@@ -278,7 +278,7 @@ func mapGoTypeToSQL(t reflect.Type, dialect SQLDialect) string {
 		}
 
 	case reflect.Struct:
-		if t.String() == "time.Time" {
+		if reflectType.String() == "time.Time" {
 			switch dialect {
 			case DialectPostgreSQL:
 				return "TIMESTAMPTZ"
@@ -296,7 +296,7 @@ func mapGoTypeToSQL(t reflect.Type, dialect SQLDialect) string {
 		return "TEXT"
 
 	case reflect.Slice:
-		if t.Elem().Kind() == reflect.Uint8 {
+		if reflectType.Elem().Kind() == reflect.Uint8 {
 			switch dialect {
 			case DialectPostgreSQL:
 				return "BYTEA"
@@ -321,64 +321,64 @@ func mapGoTypeToSQL(t reflect.Type, dialect SQLDialect) string {
 	}
 }
 
-func bindValue(val reflect.Value, dialect SQLDialect) (any, error) {
-	if !val.IsValid() {
+func bindValue(reflectValue reflect.Value, dialect SQLDialect) (any, error) {
+	if !reflectValue.IsValid() {
 		return nil, nil
 	}
 
-	for val.Kind() == reflect.Ptr {
-		if val.IsNil() {
+	for reflectValue.Kind() == reflect.Ptr {
+		if reflectValue.IsNil() {
 			return nil, nil
 		}
-		val = val.Elem()
+		reflectValue = reflectValue.Elem()
 	}
 
-	switch val.Kind() {
+	switch reflectValue.Kind() {
 	case reflect.String:
-		return val.String(), nil
+		return reflectValue.String(), nil
 	case reflect.Int, reflect.Int32, reflect.Int16, reflect.Int8:
-		return val.Int(), nil
+		return reflectValue.Int(), nil
 	case reflect.Int64:
-		return val.Int(), nil
+		return reflectValue.Int(), nil
 	case reflect.Float32, reflect.Float64:
-		return val.Float(), nil
+		return reflectValue.Float(), nil
 	case reflect.Bool:
-		b := val.Bool()
+		boolValue := reflectValue.Bool()
 		if dialect == DialectPostgreSQL {
-			return b, nil
+			return boolValue, nil
 		}
-		if b {
+		if boolValue {
 			return 1, nil
 		}
 		return 0, nil
 	case reflect.Struct:
-		if val.Type().String() == "time.Time" {
-			t := val.Interface().(time.Time)
+		if reflectValue.Type().String() == "time.Time" {
+			timeValue := reflectValue.Interface().(time.Time)
 			switch dialect {
 			case DialectSQLite:
-				return t.Format(time.RFC3339Nano), nil
+				return timeValue.Format(time.RFC3339Nano), nil
 			default:
-				return t, nil
+				return timeValue, nil
 			}
 		}
-		jsonBytes, err := json.Marshal(val.Interface())
+		jsonBytes, err := json.Marshal(reflectValue.Interface())
 		if err != nil {
 			return nil, err
 		}
 		return string(jsonBytes), nil
 
 	case reflect.Slice:
-		if val.Type().Elem().Kind() == reflect.Uint8 {
-			return val.Bytes(), nil
+		if reflectValue.Type().Elem().Kind() == reflect.Uint8 {
+			return reflectValue.Bytes(), nil
 		}
-		jsonBytes, err := json.Marshal(val.Interface())
+		jsonBytes, err := json.Marshal(reflectValue.Interface())
 		if err != nil {
 			return nil, err
 		}
 		return string(jsonBytes), nil
 
 	default:
-		jsonBytes, err := json.Marshal(val.Interface())
+		jsonBytes, err := json.Marshal(reflectValue.Interface())
 		if err != nil {
 			return nil, err
 		}

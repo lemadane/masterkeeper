@@ -88,7 +88,7 @@ func NewWalManager(directory string, durability DurabilityMode, tableStorageReso
 		return nil, fmt.Errorf("failed to seek WAL: %w", err)
 	}
 
-	wm := &WalManager{
+	walManager := &WalManager{
 		walFile:      file,
 		walPath:      walPath,
 		durability:   durability,
@@ -98,130 +98,130 @@ func NewWalManager(directory string, durability DurabilityMode, tableStorageReso
 		tableStorage: tableStorageResolver,
 	}
 
-	wm.wg.Add(1)
-	go wm.backgroundWriterLoop()
+	walManager.wg.Add(1)
+	go walManager.backgroundWriterLoop()
 
-	return wm, nil
+	return walManager, nil
 }
 
-func (wm *WalManager) Submit(task *WriteTask) {
-	wm.writeQueue <- task
+func (walManager *WalManager) Submit(task *WriteTask) {
+	walManager.writeQueue <- task
 }
 
-func (wm *WalManager) Close() error {
+func (walManager *WalManager) Close() error {
 	select {
-	case <-wm.closeChan:
+	case <-walManager.closeChan:
 		return nil // already closed
 	default:
 	}
 
-	close(wm.closeChan)
-	wm.wg.Wait()
+	close(walManager.closeChan)
+	walManager.wg.Wait()
 
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
-	if wm.walFile != nil {
-		_ = wm.walFile.Sync()
-		err := wm.walFile.Close()
-		wm.walFile = nil
+	walManager.mu.Lock()
+	defer walManager.mu.Unlock()
+	if walManager.walFile != nil {
+		_ = walManager.walFile.Sync()
+		err := walManager.walFile.Close()
+		walManager.walFile = nil
 		return err
 	}
 	return nil
 }
 
-func (wm *WalManager) Truncate() error {
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
-	if wm.walFile == nil {
+func (walManager *WalManager) Truncate() error {
+	walManager.mu.Lock()
+	defer walManager.mu.Unlock()
+	if walManager.walFile == nil {
 		return ErrClosed
 	}
 
-	if err := wm.walFile.Truncate(0); err != nil {
+	if err := walManager.walFile.Truncate(0); err != nil {
 		return err
 	}
-	if _, err := wm.walFile.Seek(0, io.SeekStart); err != nil {
+	if _, err := walManager.walFile.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	return wm.walFile.Sync()
+	return walManager.walFile.Sync()
 }
 
-func (wm *WalManager) AppendRollbackMarker(txID int64, gen int64, reason string) error {
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
-	if wm.walFile == nil {
+func (walManager *WalManager) AppendRollbackMarker(transactionID int64, generation int64, reason string) error {
+	walManager.mu.Lock()
+	defer walManager.mu.Unlock()
+	if walManager.walFile == nil {
 		return ErrClosed
 	}
 
-	rec := WalRecord{
+	record := WalRecord{
 		Type:          OpRollbackTransaction,
-		TransactionID: txID,
-		Generation:    gen,
+		TransactionID: transactionID,
+		Generation:    generation,
 		Payload:       []byte(reason),
 	}
 
-	var buf bytes.Buffer
-	if err := wm.writeRecordToBuffer(&buf, rec); err != nil {
+	var buffer bytes.Buffer
+	if err := walManager.writeRecordToBuffer(&buffer, record); err != nil {
 		return err
 	}
 
-	if _, err := wm.walFile.Write(buf.Bytes()); err != nil {
+	if _, err := walManager.walFile.Write(buffer.Bytes()); err != nil {
 		return err
 	}
 
-	if wm.durability == DurabilitySync {
-		return wm.walFile.Sync()
+	if walManager.durability == DurabilitySync {
+		return walManager.walFile.Sync()
 	}
 	return nil
 }
 
-func (wm *WalManager) writeRecordToBuffer(w io.Writer, rec WalRecord) error {
+func (walManager *WalManager) writeRecordToBuffer(writer io.Writer, record WalRecord) error {
 	// CRC computed over Type (1 byte) + TxID (8 bytes) + Gen (8 bytes) + Payload (N bytes)
 	crcTable := crc32.MakeTable(crc32.Castagnoli)
 	hash := crc32.New(crcTable)
 
-	typeByte := byte(rec.Type)
+	typeByte := byte(record.Type)
 	_, _ = hash.Write([]byte{typeByte})
 
 	var temp [16]byte
-	binary.BigEndian.PutUint64(temp[0:8], uint64(rec.TransactionID))
-	binary.BigEndian.PutUint64(temp[8:16], uint64(rec.Generation))
+	binary.BigEndian.PutUint64(temp[0:8], uint64(record.TransactionID))
+	binary.BigEndian.PutUint64(temp[8:16], uint64(record.Generation))
 	_, _ = hash.Write(temp[:])
 
-	if len(rec.Payload) > 0 {
-		_, _ = hash.Write(rec.Payload)
+	if len(record.Payload) > 0 {
+		_, _ = hash.Write(record.Payload)
 	}
 	checksum := hash.Sum32()
 
-	if err := binary.Write(w, binary.BigEndian, int32(WalMagic)); err != nil {
+	if err := binary.Write(writer, binary.BigEndian, int32(WalMagic)); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.BigEndian, typeByte); err != nil {
+	if err := binary.Write(writer, binary.BigEndian, typeByte); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.BigEndian, rec.TransactionID); err != nil {
+	if err := binary.Write(writer, binary.BigEndian, record.TransactionID); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.BigEndian, rec.Generation); err != nil {
+	if err := binary.Write(writer, binary.BigEndian, record.Generation); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.BigEndian, int32(len(rec.Payload))); err != nil {
+	if err := binary.Write(writer, binary.BigEndian, int32(len(record.Payload))); err != nil {
 		return err
 	}
-	if err := binary.Write(w, binary.BigEndian, int32(checksum)); err != nil {
+	if err := binary.Write(writer, binary.BigEndian, int32(checksum)); err != nil {
 		return err
 	}
-	if len(rec.Payload) > 0 {
-		_, err := w.Write(rec.Payload)
+	if len(record.Payload) > 0 {
+		_, err := writer.Write(record.Payload)
 		return err
 	}
 	return nil
 }
 
-func (wm *WalManager) ReadAllRecords() ([]WalRecord, error) {
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
+func (walManager *WalManager) ReadAllRecords() ([]WalRecord, error) {
+	walManager.mu.Lock()
+	defer walManager.mu.Unlock()
 
-	if _, err := wm.walFile.Seek(0, io.SeekStart); err != nil {
+	if _, err := walManager.walFile.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
 
@@ -230,7 +230,7 @@ func (wm *WalManager) ReadAllRecords() ([]WalRecord, error) {
 
 	for {
 		var magic int32
-		err := binary.Read(wm.walFile, binary.BigEndian, &magic)
+		err := binary.Read(walManager.walFile, binary.BigEndian, &magic)
 		if err == io.EOF {
 			break
 		}
@@ -240,67 +240,67 @@ func (wm *WalManager) ReadAllRecords() ([]WalRecord, error) {
 
 		if magic != WalMagic {
 			// Check if we are at the end (truncated write)
-			curr, _ := wm.walFile.Seek(0, io.SeekCurrent)
-			size, _ := wm.walFile.Seek(0, io.SeekEnd)
-			if curr >= size-4 {
+			currentOffset, _ := walManager.walFile.Seek(0, io.SeekCurrent)
+			fileSize, _ := walManager.walFile.Seek(0, io.SeekEnd)
+			if currentOffset >= fileSize-4 {
 				break
 			}
 			return nil, fmt.Errorf("corrupt WAL: magic bytes mismatch")
 		}
 
-		var typeByte byte
-		var txID int64
-		var gen int64
-		var payloadLen int32
-		var checksum int32
+		var typeByteValue byte
+		var transactionID int64
+		var generation int64
+		var payloadLength int32
+		var checksumValue int32
 
-		if err := binary.Read(wm.walFile, binary.BigEndian, &typeByte); err != nil {
+		if err := binary.Read(walManager.walFile, binary.BigEndian, &typeByteValue); err != nil {
 			break
 		}
-		if err := binary.Read(wm.walFile, binary.BigEndian, &txID); err != nil {
+		if err := binary.Read(walManager.walFile, binary.BigEndian, &transactionID); err != nil {
 			break
 		}
-		if err := binary.Read(wm.walFile, binary.BigEndian, &gen); err != nil {
+		if err := binary.Read(walManager.walFile, binary.BigEndian, &generation); err != nil {
 			break
 		}
-		if err := binary.Read(wm.walFile, binary.BigEndian, &payloadLen); err != nil {
+		if err := binary.Read(walManager.walFile, binary.BigEndian, &payloadLength); err != nil {
 			break
 		}
-		if err := binary.Read(wm.walFile, binary.BigEndian, &checksum); err != nil {
+		if err := binary.Read(walManager.walFile, binary.BigEndian, &checksumValue); err != nil {
 			break
 		}
 
-		payload := make([]byte, payloadLen)
-		if _, err := io.ReadFull(wm.walFile, payload); err != nil {
+		payload := make([]byte, payloadLength)
+		if _, err := io.ReadFull(walManager.walFile, payload); err != nil {
 			// Truncated payload at end of file - safe to ignore
 			break
 		}
 
 		// Verify Checksum
 		hash := crc32.New(crcTable)
-		_, _ = hash.Write([]byte{typeByte})
+		_, _ = hash.Write([]byte{typeByteValue})
 		var temp [16]byte
-		binary.BigEndian.PutUint64(temp[0:8], uint64(txID))
-		binary.BigEndian.PutUint64(temp[8:16], uint64(gen))
+		binary.BigEndian.PutUint64(temp[0:8], uint64(transactionID))
+		binary.BigEndian.PutUint64(temp[8:16], uint64(generation))
 		_, _ = hash.Write(temp[:])
 		if len(payload) > 0 {
 			_, _ = hash.Write(payload)
 		}
 
-		if hash.Sum32() != uint32(checksum) {
+		if hash.Sum32() != uint32(checksumValue) {
 			// If not at the end of the file, this is middle corruption
-			curr, _ := wm.walFile.Seek(0, io.SeekCurrent)
-			size, _ := wm.walFile.Seek(0, io.SeekEnd)
-			if curr >= size {
+			currentOffset, _ := walManager.walFile.Seek(0, io.SeekCurrent)
+			fileSize, _ := walManager.walFile.Seek(0, io.SeekEnd)
+			if currentOffset >= fileSize {
 				break
 			}
 			return nil, fmt.Errorf("corrupt WAL: checksum mismatch")
 		}
 
 		records = append(records, WalRecord{
-			Type:          WalOperation(typeByte),
-			TransactionID: txID,
-			Generation:    gen,
+			Type:          WalOperation(typeByteValue),
+			TransactionID: transactionID,
+			Generation:    generation,
 			Payload:       payload,
 		})
 	}
@@ -308,153 +308,153 @@ func (wm *WalManager) ReadAllRecords() ([]WalRecord, error) {
 	return records, nil
 }
 
-func (wm *WalManager) backgroundWriterLoop() {
-	defer wm.wg.Done()
+func (walManager *WalManager) backgroundWriterLoop() {
+	defer walManager.wg.Done()
 
 	for {
 		select {
-		case <-wm.closeChan:
+		case <-walManager.closeChan:
 			// Process any remaining tasks
-			for len(wm.writeQueue) > 0 {
-				task := <-wm.writeQueue
-				wm.processTasks([]*WriteTask{task})
+			for len(walManager.writeQueue) > 0 {
+				writeTask := <-walManager.writeQueue
+				walManager.processTasks([]*WriteTask{writeTask})
 			}
 			return
-		case task := <-wm.writeQueue:
+		case writeTask := <-walManager.writeQueue:
 			var tasks []*WriteTask
-			tasks = append(tasks, task)
+			tasks = append(tasks, writeTask)
 
 			// If BATCHED, gather tasks for up to 10ms
-			if wm.durability == DurabilityBatched {
-				deadline := time.NewTimer(10 * time.Millisecond)
+			if walManager.durability == DurabilityBatched {
+				deadlineTimer := time.NewTimer(10 * time.Millisecond)
 			gatherLoop:
 				for len(tasks) < 100 {
 					select {
-					case nextTask := <-wm.writeQueue:
-						tasks = append(tasks, nextTask)
-					case <-deadline.C:
+					case nextWriteTask := <-walManager.writeQueue:
+						tasks = append(tasks, nextWriteTask)
+					case <-deadlineTimer.C:
 						break gatherLoop
-					case <-wm.closeChan:
+					case <-walManager.closeChan:
 						break gatherLoop
 					}
 				}
-				deadline.Stop()
+				deadlineTimer.Stop()
 			}
 
-			wm.processTasks(tasks)
+			walManager.processTasks(tasks)
 		}
 	}
 }
 
-func (wm *WalManager) processTasks(tasks []*WriteTask) {
+func (walManager *WalManager) processTasks(tasks []*WriteTask) {
 	if len(tasks) == 0 {
 		return
 	}
 
-	wm.mu.Lock()
-	defer wm.mu.Unlock()
+	walManager.mu.Lock()
+	defer walManager.mu.Unlock()
 
-	var buf bytes.Buffer
+	var buffer bytes.Buffer
 	var lastErr error
 	modifiedTables := make(map[string]*TableStorage)
 
 	// Step 1: Write all WAL records to buffer
-	for _, task := range tasks {
+	for _, writeTask := range tasks {
 		// BEGIN
-		beginRec := WalRecord{
+		beginRecord := WalRecord{
 			Type:          OpBeginTransaction,
-			TransactionID: task.TxID,
-			Generation:    task.Generation,
+			TransactionID: writeTask.TxID,
+			Generation:    writeTask.Generation,
 		}
-		if err := wm.writeRecordToBuffer(&buf, beginRec); err != nil {
+		if err := walManager.writeRecordToBuffer(&buffer, beginRecord); err != nil {
 			lastErr = err
 			break
 		}
 
 		// Mutations
-		for _, rec := range task.WalRecords {
-			if err := wm.writeRecordToBuffer(&buf, rec); err != nil {
+		for _, record := range writeTask.WalRecords {
+			if err := walManager.writeRecordToBuffer(&buffer, record); err != nil {
 				lastErr = err
 				break
 			}
 		}
 
 		// COMMIT
-		commitRec := WalRecord{
+		commitRecord := WalRecord{
 			Type:          OpCommitTransaction,
-			TransactionID: task.TxID,
-			Generation:    task.Generation,
+			TransactionID: writeTask.TxID,
+			Generation:    writeTask.Generation,
 		}
-		if err := wm.writeRecordToBuffer(&buf, commitRec); err != nil {
+		if err := walManager.writeRecordToBuffer(&buffer, commitRecord); err != nil {
 			lastErr = err
 			break
 		}
 	}
 
 	// Step 2: Write WAL buffer to file
-	if lastErr == nil && buf.Len() > 0 {
-		if _, err := wm.walFile.Write(buf.Bytes()); err != nil {
+	if lastErr == nil && buffer.Len() > 0 {
+		if _, err := walManager.walFile.Write(buffer.Bytes()); err != nil {
 			lastErr = err
 		}
 	}
 
 	// Step 3: Write table storage appends
 	taskResults := make([]WriteResult, len(tasks))
-	for idx, task := range tasks {
+	for index, writeTask := range tasks {
 		if lastErr != nil {
-			taskResults[idx] = WriteResult{Err: lastErr}
+			taskResults[index] = WriteResult{Err: lastErr}
 			continue
 		}
 
-		ptrsMap := make(map[string][]RecordPointer)
+		pointersMap := make(map[string][]RecordPointer)
 		var taskErr error
 
-		for tableName, appends := range task.TableAppends {
-			storage, err := wm.tableStorage(tableName)
+		for tableName, appends := range writeTask.TableAppends {
+			tableStorageVal, err := walManager.tableStorage(tableName)
 			if err != nil {
 				taskErr = err
 				break
 			}
-			modifiedTables[tableName] = storage
+			modifiedTables[tableName] = tableStorageVal
 
-			ptrs, err := storage.AppendRecords(appends)
+			recordPointers, err := tableStorageVal.AppendRecords(appends)
 			if err != nil {
 				taskErr = err
 				break
 			}
-			ptrsMap[tableName] = ptrs
+			pointersMap[tableName] = recordPointers
 		}
 
 		if taskErr != nil {
 			lastErr = taskErr
-			taskResults[idx] = WriteResult{Err: taskErr}
+			taskResults[index] = WriteResult{Err: taskErr}
 		} else {
-			taskResults[idx] = WriteResult{Pointers: ptrsMap}
+			taskResults[index] = WriteResult{Pointers: pointersMap}
 		}
 	}
 
 	// Step 4: Sync files if SYNC or BATCHED
-	if lastErr == nil && (wm.durability == DurabilitySync || wm.durability == DurabilityBatched) {
-		if err := wm.walFile.Sync(); err != nil {
+	if lastErr == nil && (walManager.durability == DurabilitySync || walManager.durability == DurabilityBatched) {
+		if err := walManager.walFile.Sync(); err != nil {
 			lastErr = err
 		}
-		for _, storage := range modifiedTables {
-			storage.mu.Lock()
-			if storage.file != nil {
-				if err := storage.file.Sync(); err != nil {
+		for _, tableStorageVal := range modifiedTables {
+			tableStorageVal.mu.Lock()
+			if tableStorageVal.file != nil {
+				if err := tableStorageVal.file.Sync(); err != nil {
 					lastErr = err
 				}
 			}
-			storage.mu.Unlock()
+			tableStorageVal.mu.Unlock()
 		}
 	}
 
 	// Step 5: Complete task done channels
-	for idx, task := range tasks {
+	for index, writeTask := range tasks {
 		if lastErr != nil {
-			task.Done <- WriteResult{Err: lastErr}
+			writeTask.Done <- WriteResult{Err: lastErr}
 		} else {
-			task.Done <- taskResults[idx]
+			writeTask.Done <- taskResults[index]
 		}
 	}
 }

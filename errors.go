@@ -16,6 +16,6 @@ type ErrDuplicateIndex struct {
 	Message   string
 }
 
-func (e *ErrDuplicateIndex) Error() string {
-	return e.Message
+func (duplicateIndexError *ErrDuplicateIndex) Error() string {
+	return duplicateIndexError.Message
 }

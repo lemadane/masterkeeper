@@ -22,125 +22,125 @@ type IndexState struct {
 	SortedKeys   []any         // kept sorted if Ordered is true
 }
 
-func NewIndexState(meta IndexMetadata) *IndexState {
-	idx := &IndexState{
-		Metadata: meta,
+func NewIndexState(metadata IndexMetadata) *IndexState {
+	indexState := &IndexState{
+		Metadata: metadata,
 	}
-	if meta.Unique {
-		idx.UniqueMap = make(map[any]any)
+	if metadata.Unique {
+		indexState.UniqueMap = make(map[any]any)
 	} else {
-		idx.SecondaryMap = make(map[any][]any)
+		indexState.SecondaryMap = make(map[any][]any)
 	}
-	return idx
+	return indexState
 }
 
-func (idx *IndexState) Copy() *IndexState {
-	newIdx := &IndexState{
-		Metadata: idx.Metadata,
+func (indexState *IndexState) Copy() *IndexState {
+	newIndexState := &IndexState{
+		Metadata: indexState.Metadata,
 	}
-	if idx.Metadata.Unique {
-		newIdx.UniqueMap = make(map[any]any)
-		for k, v := range idx.UniqueMap {
-			newIdx.UniqueMap[k] = v
+	if indexState.Metadata.Unique {
+		newIndexState.UniqueMap = make(map[any]any)
+		for indexValue, primaryKey := range indexState.UniqueMap {
+			newIndexState.UniqueMap[indexValue] = primaryKey
 		}
 	} else {
-		newIdx.SecondaryMap = make(map[any][]any)
-		for k, v := range idx.SecondaryMap {
-			sliceCopy := make([]any, len(v))
-			copy(sliceCopy, v)
-			newIdx.SecondaryMap[k] = sliceCopy
+		newIndexState.SecondaryMap = make(map[any][]any)
+		for indexValue, primaryKeys := range indexState.SecondaryMap {
+			sliceCopy := make([]any, len(primaryKeys))
+			copy(sliceCopy, primaryKeys)
+			newIndexState.SecondaryMap[indexValue] = sliceCopy
 		}
-		if idx.Metadata.Ordered {
-			newIdx.SortedKeys = make([]any, len(idx.SortedKeys))
-			copy(newIdx.SortedKeys, idx.SortedKeys)
+		if indexState.Metadata.Ordered {
+			newIndexState.SortedKeys = make([]any, len(indexState.SortedKeys))
+			copy(newIndexState.SortedKeys, indexState.SortedKeys)
 		}
 	}
-	return newIdx
+	return newIndexState
 }
 
-func (idx *IndexState) Add(indexVal any, primaryKey any) {
-	if indexVal == nil {
+func (indexState *IndexState) Add(indexValue any, primaryKey any) {
+	if indexValue == nil {
 		return
 	}
-	if idx.Metadata.Unique {
-		idx.UniqueMap[indexVal] = primaryKey
+	if indexState.Metadata.Unique {
+		indexState.UniqueMap[indexValue] = primaryKey
 	} else {
-		keys := idx.SecondaryMap[indexVal]
+		primaryKeys := indexState.SecondaryMap[indexValue]
 		found := false
-		for _, k := range keys {
-			if k == primaryKey {
+		for _, key := range primaryKeys {
+			if key == primaryKey {
 				found = true
 				break
 			}
 		}
 		if !found {
-			idx.SecondaryMap[indexVal] = append(keys, primaryKey)
+			indexState.SecondaryMap[indexValue] = append(primaryKeys, primaryKey)
 		}
 
-		if idx.Metadata.Ordered {
+		if indexState.Metadata.Ordered {
 			// Maintain SortedKeys
-			idx.insertSortedKey(indexVal)
+			indexState.insertSortedKey(indexValue)
 		}
 	}
 }
 
-func (idx *IndexState) Remove(indexVal any, primaryKey any) {
-	if indexVal == nil {
+func (indexState *IndexState) Remove(indexValue any, primaryKey any) {
+	if indexValue == nil {
 		return
 	}
-	if idx.Metadata.Unique {
-		delete(idx.UniqueMap, indexVal)
+	if indexState.Metadata.Unique {
+		delete(indexState.UniqueMap, indexValue)
 	} else {
-		keys := idx.SecondaryMap[indexVal]
-		for i, k := range keys {
-			if k == primaryKey {
-				idx.SecondaryMap[indexVal] = append(keys[:i], keys[i+1:]...)
+		primaryKeys := indexState.SecondaryMap[indexValue]
+		for index, key := range primaryKeys {
+			if key == primaryKey {
+				indexState.SecondaryMap[indexValue] = append(primaryKeys[:index], primaryKeys[index+1:]...)
 				break
 			}
 		}
-		if len(idx.SecondaryMap[indexVal]) == 0 {
-			delete(idx.SecondaryMap, indexVal)
-			if idx.Metadata.Ordered {
-				idx.removeSortedKey(indexVal)
+		if len(indexState.SecondaryMap[indexValue]) == 0 {
+			delete(indexState.SecondaryMap, indexValue)
+			if indexState.Metadata.Ordered {
+				indexState.removeSortedKey(indexValue)
 			}
 		}
 	}
 }
 
-func (idx *IndexState) insertSortedKey(key any) {
+func (indexState *IndexState) insertSortedKey(key any) {
 	// Binary search to find position
-	low, high := 0, len(idx.SortedKeys)-1
-	pos := len(idx.SortedKeys)
+	low, high := 0, len(indexState.SortedKeys)-1
+	position := len(indexState.SortedKeys)
 	for low <= high {
 		mid := (low + high) / 2
-		cmp := compareValues(idx.SortedKeys[mid], key)
-		if cmp == 0 {
+		comparison := compareValues(indexState.SortedKeys[mid], key)
+		if comparison == 0 {
 			return // already present
-		} else if cmp < 0 {
+		} else if comparison < 0 {
 			low = mid + 1
 		} else {
-			pos = mid
+			position = mid
 			high = mid - 1
 		}
 	}
-	if pos == len(idx.SortedKeys) {
-		idx.SortedKeys = append(idx.SortedKeys, key)
+	if position == len(indexState.SortedKeys) {
+		indexState.SortedKeys = append(indexState.SortedKeys, key)
 	} else {
-		idx.SortedKeys = append(idx.SortedKeys, nil)
-		copy(idx.SortedKeys[pos+1:], idx.SortedKeys[pos:])
-		idx.SortedKeys[pos] = key
+		indexState.SortedKeys = append(indexState.SortedKeys, nil)
+		copy(indexState.SortedKeys[position+1:], indexState.SortedKeys[position:])
+		indexState.SortedKeys[position] = key
 	}
 }
 
-func (idx *IndexState) removeSortedKey(key any) {
-	low, high := 0, len(idx.SortedKeys)-1
+func (indexState *IndexState) removeSortedKey(key any) {
+	low, high := 0, len(indexState.SortedKeys)-1
 	for low <= high {
 		mid := (low + high) / 2
-		cmp := compareValues(idx.SortedKeys[mid], key)
-		if cmp == 0 {
-			idx.SortedKeys = append(idx.SortedKeys[:mid], idx.SortedKeys[mid+1:]...)
+		comparison := compareValues(indexState.SortedKeys[mid], key)
+		if comparison == 0 {
+			indexState.SortedKeys = append(indexState.SortedKeys[:mid], indexState.SortedKeys[mid+1:]...)
 			return
-		} else if cmp < 0 {
+		} else if comparison < 0 {
 			low = mid + 1
 		} else {
 			high = mid - 1
@@ -148,14 +148,14 @@ func (idx *IndexState) removeSortedKey(key any) {
 	}
 }
 
-func (idx *IndexState) Clear() {
-	if idx.UniqueMap != nil {
-		idx.UniqueMap = make(map[any]any)
+func (indexState *IndexState) Clear() {
+	if indexState.UniqueMap != nil {
+		indexState.UniqueMap = make(map[any]any)
 	}
-	if idx.SecondaryMap != nil {
-		idx.SecondaryMap = make(map[any][]any)
+	if indexState.SecondaryMap != nil {
+		indexState.SecondaryMap = make(map[any][]any)
 	}
-	idx.SortedKeys = nil
+	indexState.SortedKeys = nil
 }
 
 type TableState struct {
@@ -168,7 +168,7 @@ type TableState struct {
 }
 
 func NewTableState(tableName string, idType reflect.Type, entityType reflect.Type, indexMetadataList []IndexMetadata) *TableState {
-	ts := &TableState{
+	tableState := &TableState{
 		TableName:         tableName,
 		IdType:            idType,
 		EntityType:        entityType,
@@ -176,74 +176,74 @@ func NewTableState(tableName string, idType reflect.Type, entityType reflect.Typ
 		Indexes:           make(map[string]*IndexState),
 		IndexMetadataList: indexMetadataList,
 	}
-	for _, meta := range indexMetadataList {
-		ts.Indexes[meta.IndexName] = NewIndexState(meta)
+	for _, metadata := range indexMetadataList {
+		tableState.Indexes[metadata.IndexName] = NewIndexState(metadata)
 	}
-	return ts
+	return tableState
 }
 
-func (ts *TableState) Copy() *TableState {
+func (tableState *TableState) Copy() *TableState {
 	newPointers := make(map[any]RecordPointer)
-	for k, v := range ts.RecordPointers {
-		newPointers[k] = v
+	for key, pointer := range tableState.RecordPointers {
+		newPointers[key] = pointer
 	}
 	newIndexes := make(map[string]*IndexState)
-	for k, v := range ts.Indexes {
-		newIndexes[k] = v.Copy()
+	for key, stateVal := range tableState.Indexes {
+		newIndexes[key] = stateVal.Copy()
 	}
 	return &TableState{
-		TableName:         ts.TableName,
-		IdType:            ts.IdType,
-		EntityType:        ts.EntityType,
+		TableName:         tableState.TableName,
+		IdType:            tableState.IdType,
+		EntityType:        tableState.EntityType,
 		RecordPointers:    newPointers,
 		Indexes:           newIndexes,
-		IndexMetadataList: ts.IndexMetadataList,
+		IndexMetadataList: tableState.IndexMetadataList,
 	}
 }
 
-func (ts *TableState) Insert(record any, ptr RecordPointer) {
+func (tableState *TableState) Insert(record any, recordPointer RecordPointer) {
 	id := getPrimaryKey(record)
-	ts.RecordPointers[id] = ptr
-	for _, idx := range ts.Indexes {
-		idxVal := getFieldValue(record, idx.Metadata.FieldName)
-		idx.Add(idxVal, id)
+	tableState.RecordPointers[id] = recordPointer
+	for _, indexState := range tableState.Indexes {
+		indexValue := getFieldValue(record, indexState.Metadata.FieldName)
+		indexState.Add(indexValue, id)
 	}
 }
 
-func (ts *TableState) Update(record any, oldRecord any, ptr RecordPointer) {
+func (tableState *TableState) Update(record any, oldRecord any, recordPointer RecordPointer) {
 	id := getPrimaryKey(record)
-	ts.RecordPointers[id] = ptr
-	for _, idx := range ts.Indexes {
-		var oldVal any
+	tableState.RecordPointers[id] = recordPointer
+	for _, indexState := range tableState.Indexes {
+		var oldValue any
 		if oldRecord != nil {
-			oldVal = getFieldValue(oldRecord, idx.Metadata.FieldName)
+			oldValue = getFieldValue(oldRecord, indexState.Metadata.FieldName)
 		}
-		newVal := getFieldValue(record, idx.Metadata.FieldName)
-		if !valuesEqual(oldVal, newVal) {
-			if oldVal != nil {
-				idx.Remove(oldVal, id)
+		newValue := getFieldValue(record, indexState.Metadata.FieldName)
+		if !valuesEqual(oldValue, newValue) {
+			if oldValue != nil {
+				indexState.Remove(oldValue, id)
 			}
-			idx.Add(newVal, id)
+			indexState.Add(newValue, id)
 		}
 	}
 }
 
-func (ts *TableState) Delete(key any, oldRecord any) {
-	delete(ts.RecordPointers, key)
+func (tableState *TableState) Delete(key any, oldRecord any) {
+	delete(tableState.RecordPointers, key)
 	if oldRecord != nil {
-		for _, idx := range ts.Indexes {
-			idxVal := getFieldValue(oldRecord, idx.Metadata.FieldName)
-			if idxVal != nil {
-				idx.Remove(idxVal, key)
+		for _, indexState := range tableState.Indexes {
+			indexValue := getFieldValue(oldRecord, indexState.Metadata.FieldName)
+			if indexValue != nil {
+				indexState.Remove(indexValue, key)
 			}
 		}
 	}
 }
 
-func (ts *TableState) Clear() {
-	ts.RecordPointers = make(map[any]RecordPointer)
-	for _, idx := range ts.Indexes {
-		idx.Clear()
+func (tableState *TableState) Clear() {
+	tableState.RecordPointers = make(map[any]RecordPointer)
+	for _, indexState := range tableState.Indexes {
+		indexState.Clear()
 	}
 }
 
@@ -259,10 +259,10 @@ func NewDatabaseState(generation int64) *DatabaseState {
 	}
 }
 
-func (ds *DatabaseState) Copy(nextGen int64) *DatabaseState {
+func (databaseState *DatabaseState) Copy(nextGen int64) *DatabaseState {
 	newTables := make(map[string]*TableState)
-	for k, v := range ds.Tables {
-		newTables[k] = v.Copy()
+	for tableName, tableStateVal := range databaseState.Tables {
+		newTables[tableName] = tableStateVal.Copy()
 	}
 	return &DatabaseState{
 		Generation: nextGen,
@@ -294,229 +294,229 @@ type structMetadata struct {
 
 var structCache sync.Map
 
-func getStructMetadata(t reflect.Type) *structMetadata {
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
+func getStructMetadata(reflectType reflect.Type) *structMetadata {
+	for reflectType.Kind() == reflect.Ptr {
+		reflectType = reflectType.Elem()
 	}
-	if t.Kind() != reflect.Struct {
+	if reflectType.Kind() != reflect.Struct {
 		return nil
 	}
 
-	if val, ok := structCache.Load(t); ok {
-		return val.(*structMetadata)
+	if cachedMetadata, found := structCache.Load(reflectType); found {
+		return cachedMetadata.(*structMetadata)
 	}
 
-	meta := &structMetadata{
+	metadata := &structMetadata{
 		fields: make(map[string]structFieldInfo),
 	}
 
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if f.PkgPath != "" { // Unexported
+	for index := 0; index < reflectType.NumField(); index++ {
+		structField := reflectType.Field(index)
+		if structField.PkgPath != "" { // Unexported
 			continue
 		}
 
-		tag := f.Tag.Get("keeper")
-		info := structFieldInfo{
-			name:  f.Name,
-			index: i,
+		tag := structField.Tag.Get("keeper")
+		fieldInfo := structFieldInfo{
+			name:  structField.Name,
+			index: index,
 		}
 
-		fieldName := f.Name
+		fieldName := structField.Name
 		if tag != "" {
 			parts := strings.Split(tag, ",")
 			if len(parts) > 0 {
-				p0 := strings.TrimSpace(parts[0])
-				if p0 != "id" && p0 != "index" && p0 != "unique" && p0 != "ordered" {
-					fieldName = p0
+				part0 := strings.TrimSpace(parts[0])
+				if part0 != "id" && part0 != "index" && part0 != "unique" && part0 != "ordered" {
+					fieldName = part0
 				}
 			}
-			for _, p := range parts {
-				switch strings.TrimSpace(p) {
+			for _, part := range parts {
+				switch strings.TrimSpace(part) {
 				case "id":
-					info.isID = true
+					fieldInfo.isID = true
 				case "index":
-					info.isIndex = true
+					fieldInfo.isIndex = true
 				case "unique":
-					info.isUnique = true
+					fieldInfo.isUnique = true
 				case "ordered":
-					info.isOrdered = true
+					fieldInfo.isOrdered = true
 				}
 			}
 		}
 
-		meta.fields[strings.ToLower(f.Name)] = info
-		meta.fields[strings.ToLower(fieldName)] = info
-		if info.isID {
-			meta.idField = info
+		metadata.fields[strings.ToLower(structField.Name)] = fieldInfo
+		metadata.fields[strings.ToLower(fieldName)] = fieldInfo
+		if fieldInfo.isID {
+			metadata.idField = fieldInfo
 		}
 
-		meta.marshalFields = append(meta.marshalFields, structFieldMarshalInfo{
-			index: i,
+		metadata.marshalFields = append(metadata.marshalFields, structFieldMarshalInfo{
+			index: index,
 			name:  fieldName,
 		})
 	}
 
-	if meta.idField.name == "" {
-		if info, ok := meta.fields["id"]; ok {
-			info.isID = true
-			meta.idField = info
-			meta.fields["id"] = info
+	if metadata.idField.name == "" {
+		if fieldInfo, found := metadata.fields["id"]; found {
+			fieldInfo.isID = true
+			metadata.idField = fieldInfo
+			metadata.fields["id"] = fieldInfo
 		}
 	}
 
-	actual, _ := structCache.LoadOrStore(t, meta)
-	return actual.(*structMetadata)
+	actualMetadata, _ := structCache.LoadOrStore(reflectType, metadata)
+	return actualMetadata.(*structMetadata)
 }
 
 func getPrimaryKey(record any) any {
-	val := reflect.ValueOf(record)
-	for val.Kind() == reflect.Ptr || val.Kind() == reflect.Interface {
-		if val.IsNil() {
+	reflectValue := reflect.ValueOf(record)
+	for reflectValue.Kind() == reflect.Ptr || reflectValue.Kind() == reflect.Interface {
+		if reflectValue.IsNil() {
 			return nil
 		}
-		val = val.Elem()
+		reflectValue = reflectValue.Elem()
 	}
-	if val.Kind() != reflect.Struct {
+	if reflectValue.Kind() != reflect.Struct {
 		return nil
 	}
 
-	meta := getStructMetadata(val.Type())
-	if meta == nil || meta.idField.name == "" {
+	metadata := getStructMetadata(reflectValue.Type())
+	if metadata == nil || metadata.idField.name == "" {
 		return nil
 	}
 
-	fieldVal := val.Field(meta.idField.index)
-	for fieldVal.Kind() == reflect.Ptr || fieldVal.Kind() == reflect.Interface {
-		if fieldVal.IsNil() {
+	fieldValue := reflectValue.Field(metadata.idField.index)
+	for fieldValue.Kind() == reflect.Ptr || fieldValue.Kind() == reflect.Interface {
+		if fieldValue.IsNil() {
 			return nil
 		}
-		fieldVal = fieldVal.Elem()
+		fieldValue = fieldValue.Elem()
 	}
-	return fieldVal.Interface()
+	return fieldValue.Interface()
 }
 
 func getFieldValue(record any, fieldName string) any {
-	val := reflect.ValueOf(record)
-	for val.Kind() == reflect.Ptr || val.Kind() == reflect.Interface {
-		if val.IsNil() {
+	reflectValue := reflect.ValueOf(record)
+	for reflectValue.Kind() == reflect.Ptr || reflectValue.Kind() == reflect.Interface {
+		if reflectValue.IsNil() {
 			return nil
 		}
-		val = val.Elem()
+		reflectValue = reflectValue.Elem()
 	}
-	if val.Kind() != reflect.Struct {
+	if reflectValue.Kind() != reflect.Struct {
 		return nil
 	}
 
-	meta := getStructMetadata(val.Type())
-	if meta == nil {
+	metadata := getStructMetadata(reflectValue.Type())
+	if metadata == nil {
 		return nil
 	}
 
-	info, ok := meta.fields[strings.ToLower(fieldName)]
-	if !ok {
+	fieldInfo, found := metadata.fields[strings.ToLower(fieldName)]
+	if !found {
 		return nil
 	}
 
-	fieldVal := val.Field(info.index)
-	for fieldVal.Kind() == reflect.Ptr || fieldVal.Kind() == reflect.Interface {
-		if fieldVal.IsNil() {
+	fieldValue := reflectValue.Field(fieldInfo.index)
+	for fieldValue.Kind() == reflect.Ptr || fieldValue.Kind() == reflect.Interface {
+		if fieldValue.IsNil() {
 			return nil
 		}
-		fieldVal = fieldVal.Elem()
+		fieldValue = fieldValue.Elem()
 	}
-	if !fieldVal.IsValid() {
+	if !fieldValue.IsValid() {
 		return nil
 	}
-	return fieldVal.Interface()
+	return fieldValue.Interface()
 }
 
-func compareValues(a, b any) int {
-	if a == nil && b == nil {
+func compareValues(leftValue, rightValue any) int {
+	if leftValue == nil && rightValue == nil {
 		return 0
 	}
-	if a == nil {
+	if leftValue == nil {
 		return -1
 	}
-	if b == nil {
+	if rightValue == nil {
 		return 1
 	}
 
-	switch va := a.(type) {
+	switch left := leftValue.(type) {
 	case string:
-		if vb, ok := b.(string); ok {
-			if va < vb {
+		if right, found := rightValue.(string); found {
+			if left < right {
 				return -1
-			} else if va > vb {
+			} else if left > right {
 				return 1
 			}
 			return 0
 		}
 	case int32:
-		if vb, ok := b.(int32); ok {
-			if va < vb {
+		if right, found := rightValue.(int32); found {
+			if left < right {
 				return -1
-			} else if va > vb {
+			} else if left > right {
 				return 1
 			}
 			return 0
 		}
 	case int64:
-		if vb, ok := b.(int64); ok {
-			if va < vb {
+		if right, found := rightValue.(int64); found {
+			if left < right {
 				return -1
-			} else if va > vb {
+			} else if left > right {
 				return 1
 			}
 			return 0
 		}
 	case int:
-		if vb, ok := b.(int); ok {
-			if va < vb {
+		if right, found := rightValue.(int); found {
+			if left < right {
 				return -1
-			} else if va > vb {
+			} else if left > right {
 				return 1
 			}
 			return 0
 		}
 	case float64:
-		if vb, ok := b.(float64); ok {
-			if va < vb {
+		if right, found := rightValue.(float64); found {
+			if left < right {
 				return -1
-			} else if va > vb {
+			} else if left > right {
 				return 1
 			}
 			return 0
 		}
 	case bool:
-		if vb, ok := b.(bool); ok {
-			if !va && vb {
+		if right, found := rightValue.(bool); found {
+			if !left && right {
 				return -1
-			} else if va && !vb {
+			} else if left && !right {
 				return 1
 			}
 			return 0
 		}
 	case time.Time:
-		if vb, ok := b.(time.Time); ok {
-			if va.Before(vb) {
+		if right, found := rightValue.(time.Time); found {
+			if left.Before(right) {
 				return -1
-			} else if va.After(vb) {
+			} else if left.After(right) {
 				return 1
 			}
 			return 0
 		}
 	}
-	sa := fmt.Sprintf("%v", a)
-	sb := fmt.Sprintf("%v", b)
-	if sa < sb {
+	leftStr := fmt.Sprintf("%v", leftValue)
+	rightStr := fmt.Sprintf("%v", rightValue)
+	if leftStr < rightStr {
 		return -1
-	} else if sa > sb {
+	} else if leftStr > rightStr {
 		return 1
 	}
 	return 0
 }
 
-func valuesEqual(a, b any) bool {
-	return compareValues(a, b) == 0
+func valuesEqual(leftValue, rightValue any) bool {
+	return compareValues(leftValue, rightValue) == 0
 }

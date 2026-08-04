@@ -35,26 +35,26 @@ type Review struct {
 	Rating    int
 }
 
-func TestStressSyncSingleTable(t *testing.T) {
+func TestStressSyncSingleTable(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-stress-sync-single-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.Durability = keeper.DurabilitySync
-	opts.RegisterTypes(User{})
+	options := keeper.DefaultOptions()
+	options.Durability = keeper.DurabilitySync
+	options.RegisterTypes(User{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
-	table, err := keeper.GetTable[int, User](db, "users")
+	userTable, err := keeper.GetTable[int, User](database, "users")
 	if err != nil {
-		t.Fatalf("failed to get table: %v", err)
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
 	const numWriters = 10
@@ -62,91 +62,91 @@ func TestStressSyncSingleTable(t *testing.T) {
 	const numQueries = 10
 	const queriesPerQueryer = 5
 
-	var wg sync.WaitGroup
-	wg.Add(numWriters + numQueries)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(numWriters + numQueries)
 
 	// Writers
-	for w := 0; w < numWriters; w++ {
+	for writerIndex := 0; writerIndex < numWriters; writerIndex++ {
 		go func(writerID int) {
-			defer wg.Done()
+			defer waitGroup.Done()
 			// Batch the 10,000 inserts inside a single transaction to execute stress testing
 			// of 1,000,000 records without hitting sequential write I/O limits of physical storage sync.
-			err := db.Transaction(func(tx *keeper.Transaction) error {
-				for i := 0; i < opsPerWriter; i++ {
-					id := writerID*opsPerWriter + i
-					u := User{
-						ID:    id,
-						Name:  fmt.Sprintf("User-%d", id),
-						Email: fmt.Sprintf("user-%d@example.com", id),
+			err := database.Transaction(func(transaction *keeper.Transaction) error {
+				for index := 0; index < opsPerWriter; index++ {
+					userID := writerID*opsPerWriter + index
+					user := User{
+						ID:    userID,
+						Name:  fmt.Sprintf("User-%d", userID),
+						Email: fmt.Sprintf("user-%d@example.com", userID),
 					}
-					if err := table.Insert(tx, u); err != nil {
+					if err := userTable.Insert(transaction, user); err != nil {
 						return err
 					}
 				}
 				return nil
 			})
 			if err != nil {
-				t.Errorf("writer transaction failed: %v", err)
+				testingT.Errorf("writer transaction failed: %v", err)
 			}
-		}(w)
+		}(writerIndex)
 	}
 
 	// Query-ers running concurrently
-	for q := 0; q < numQueries; q++ {
+	for queryIndex := 0; queryIndex < numQueries; queryIndex++ {
 		go func() {
-			defer wg.Done()
-			r := rand.New(rand.NewSource(time.Now().UnixNano()))
-			for i := 0; i < queriesPerQueryer; i++ {
-				queryVal := fmt.Sprintf("User-%d", r.Intn(numWriters*opsPerWriter))
-				res, err := table.Query(nil).
+			defer waitGroup.Done()
+			randomGenerator := rand.New(rand.NewSource(time.Now().UnixNano()))
+			for index := 0; index < queriesPerQueryer; index++ {
+				queryVal := fmt.Sprintf("User-%d", randomGenerator.Intn(numWriters*opsPerWriter))
+				results, err := userTable.Query(nil).
 					Where(keeper.Eq("Name", queryVal)).
 					List()
 				if err != nil {
-					t.Errorf("query error: %v", err)
+					testingT.Errorf("query error: %v", err)
 				}
-				_ = res
+				_ = results
 				time.Sleep(10 * time.Microsecond)
 			}
 		}()
 	}
 
-	wg.Wait()
+	waitGroup.Wait()
 
 	// Verify all 1,000,000 records are correctly saved
-	for i := 0; i < numWriters*opsPerWriter; i += 1000 { // sample check every 1000th record for speed
-		u, found, err := table.FindByID(nil, i)
+	for index := 0; index < numWriters*opsPerWriter; index += 1000 { // sample check every 1000th record for speed
+		user, found, err := userTable.FindByID(nil, index)
 		if err != nil {
-			t.Fatalf("failed to find user %d: %v", i, err)
+			testingT.Fatalf("failed to find user %d: %v", index, err)
 		}
 		if !found {
-			t.Fatalf("user %d was not found", i)
+			testingT.Fatalf("user %d was not found", index)
 		}
-		if u.Name != fmt.Sprintf("User-%d", i) {
-			t.Errorf("incorrect record content for user %d: %+v", i, u)
+		if user.Name != fmt.Sprintf("User-%d", index) {
+			testingT.Errorf("incorrect record content for user %d: %+v", index, user)
 		}
 	}
 }
 
-func TestStressAsyncSingleTable(t *testing.T) {
+func TestStressAsyncSingleTable(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-stress-async-single-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.Durability = keeper.DurabilityAsync
-	opts.RegisterTypes(User{})
+	options := keeper.DefaultOptions()
+	options.Durability = keeper.DurabilityAsync
+	options.RegisterTypes(User{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
-	table, err := keeper.GetTable[int, User](db, "users")
+	userTable, err := keeper.GetTable[int, User](database, "users")
 	if err != nil {
-		t.Fatalf("failed to get table: %v", err)
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
 	const numWriters = 10
@@ -154,154 +154,154 @@ func TestStressAsyncSingleTable(t *testing.T) {
 	const numQueries = 10
 	const queriesPerQueryer = 5
 
-	var wg sync.WaitGroup
-	wg.Add(numWriters + numQueries)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(numWriters + numQueries)
 
 	// Writers
-	for w := 0; w < numWriters; w++ {
+	for writerIndex := 0; writerIndex < numWriters; writerIndex++ {
 		go func(writerID int) {
-			defer wg.Done()
-			err := db.Transaction(func(tx *keeper.Transaction) error {
-				for i := 0; i < opsPerWriter; i++ {
-					id := writerID*opsPerWriter + i
-					u := User{
-						ID:    id,
-						Name:  fmt.Sprintf("User-%d", id),
-						Email: fmt.Sprintf("user-%d@example.com", id),
+			defer waitGroup.Done()
+			err := database.Transaction(func(transaction *keeper.Transaction) error {
+				for index := 0; index < opsPerWriter; index++ {
+					userID := writerID*opsPerWriter + index
+					user := User{
+						ID:    userID,
+						Name:  fmt.Sprintf("User-%d", userID),
+						Email: fmt.Sprintf("user-%d@example.com", userID),
 					}
-					if err := table.Insert(tx, u); err != nil {
+					if err := userTable.Insert(transaction, user); err != nil {
 						return err
 					}
 				}
 				return nil
 			})
 			if err != nil {
-				t.Errorf("writer transaction failed: %v", err)
+				testingT.Errorf("writer transaction failed: %v", err)
 			}
-		}(w)
+		}(writerIndex)
 	}
 
 	// Query-ers running concurrently
-	for q := 0; q < numQueries; q++ {
+	for queryIndex := 0; queryIndex < numQueries; queryIndex++ {
 		go func() {
-			defer wg.Done()
-			r := rand.New(rand.NewSource(time.Now().UnixNano()))
-			for i := 0; i < queriesPerQueryer; i++ {
-				queryVal := fmt.Sprintf("User-%d", r.Intn(numWriters*opsPerWriter))
-				res, err := table.Query(nil).
+			defer waitGroup.Done()
+			randomGenerator := rand.New(rand.NewSource(time.Now().UnixNano()))
+			for index := 0; index < queriesPerQueryer; index++ {
+				queryVal := fmt.Sprintf("User-%d", randomGenerator.Intn(numWriters*opsPerWriter))
+				results, err := userTable.Query(nil).
 					Where(keeper.Eq("Name", queryVal)).
 					List()
 				if err != nil {
-					t.Errorf("query error: %v", err)
+					testingT.Errorf("query error: %v", err)
 				}
-				_ = res
+				_ = results
 				time.Sleep(10 * time.Microsecond)
 			}
 		}()
 	}
 
-	wg.Wait()
+	waitGroup.Wait()
 
 	// Verify all 1,000,000 records
-	for i := 0; i < numWriters*opsPerWriter; i += 1000 {
-		u, found, err := table.FindByID(nil, i)
+	for index := 0; index < numWriters*opsPerWriter; index += 1000 {
+		user, found, err := userTable.FindByID(nil, index)
 		if err != nil {
-			t.Fatalf("failed to find user %d: %v", i, err)
+			testingT.Fatalf("failed to find user %d: %v", index, err)
 		}
 		if !found {
-			t.Fatalf("user %d was not found", i)
+			testingT.Fatalf("user %d was not found", index)
 		}
-		if u.Name != fmt.Sprintf("User-%d", i) {
-			t.Errorf("incorrect record content for user %d: %+v", i, u)
+		if user.Name != fmt.Sprintf("User-%d", index) {
+			testingT.Errorf("incorrect record content for user %d: %+v", index, user)
 		}
 	}
 }
 
-func TestStressSyncMultiTable(t *testing.T) {
+func TestStressSyncMultiTable(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-stress-sync-multi-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.Durability = keeper.DurabilitySync
-	opts.RegisterTypes(User{}, Order{}, Product{}, Review{})
+	options := keeper.DefaultOptions()
+	options.Durability = keeper.DurabilitySync
+	options.RegisterTypes(User{}, Order{}, Product{}, Review{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
-	users, _ := keeper.GetTable[int, User](db, "users")
-	orders, _ := keeper.GetTable[string, Order](db, "orders")
-	products, _ := keeper.GetTable[string, Product](db, "products")
-	reviews, _ := keeper.GetTable[string, Review](db, "reviews")
+	users, _ := keeper.GetTable[int, User](database, "users")
+	orders, _ := keeper.GetTable[string, Order](database, "orders")
+	products, _ := keeper.GetTable[string, Product](database, "products")
+	reviews, _ := keeper.GetTable[string, Review](database, "reviews")
 
 	const numWriters = 10
 	const opsPerWriter = 25000 // 10 * 25000 * 4 tables = 1,000,000 structs saved
 	const numQueries = 10
 	const queriesPerQueryer = 5
 
-	var wg sync.WaitGroup
-	wg.Add(numWriters + numQueries)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(numWriters + numQueries)
 
 	// Writers performing mixed table insertions
-	for w := 0; w < numWriters; w++ {
+	for writerIndex := 0; writerIndex < numWriters; writerIndex++ {
 		go func(writerID int) {
-			defer wg.Done()
-			err := db.Transaction(func(tx *keeper.Transaction) error {
-				for i := 0; i < opsPerWriter; i++ {
-					id := writerID*opsPerWriter + i
+			defer waitGroup.Done()
+			err := database.Transaction(func(transaction *keeper.Transaction) error {
+				for index := 0; index < opsPerWriter; index++ {
+					userID := writerID*opsPerWriter + index
 					
 					// 1. Insert user
-					_ = users.Insert(tx, User{
-						ID:    id,
-						Name:  fmt.Sprintf("User-%d", id),
-						Email: fmt.Sprintf("user-%d@example.com", id),
+					_ = users.Insert(transaction, User{
+						ID:    userID,
+						Name:  fmt.Sprintf("User-%d", userID),
+						Email: fmt.Sprintf("user-%d@example.com", userID),
 					})
 
 					// 2. Insert product
-					pID := fmt.Sprintf("p_%d", id)
-					_ = products.Insert(tx, Product{
-						ID:    pID,
-						Title: fmt.Sprintf("Product-%d", id),
-						Price: float64(10 + id),
+					productID := fmt.Sprintf("p_%d", userID)
+					_ = products.Insert(transaction, Product{
+						ID:    productID,
+						Title: fmt.Sprintf("Product-%d", userID),
+						Price: float64(10 + userID),
 					})
 
 					// 3. Insert order
-					oID := fmt.Sprintf("o_%d", id)
-					_ = orders.Insert(tx, Order{
-						ID:        oID,
-						UserID:    id,
-						Amount:    float64(50 + id),
+					orderID := fmt.Sprintf("o_%d", userID)
+					_ = orders.Insert(transaction, Order{
+						ID:        orderID,
+						UserID:    userID,
+						Amount:    float64(50 + userID),
 						CreatedAt: time.Now(),
 					})
 
 					// 4. Insert review
-					rID := fmt.Sprintf("r_%d", id)
-					_ = reviews.Insert(tx, Review{
-						ID:        rID,
-						ProductID: pID,
+					reviewID := fmt.Sprintf("r_%d", userID)
+					_ = reviews.Insert(transaction, Review{
+						ID:        reviewID,
+						ProductID: productID,
 						Rating:    5,
 					})
 				}
 				return nil
 			})
 			if err != nil {
-				t.Errorf("writer transaction failed: %v", err)
+				testingT.Errorf("writer transaction failed: %v", err)
 			}
-		}(w)
+		}(writerIndex)
 	}
 
 	// Readers querying mixed tables
-	for r := 0; r < numQueries; r++ {
+	for readerIndex := 0; readerIndex < numQueries; readerIndex++ {
 		go func() {
-			defer wg.Done()
-			rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-			for i := 0; i < queriesPerQueryer; i++ {
-				target := rnd.Intn(numWriters * opsPerWriter)
+			defer waitGroup.Done()
+			randomGenerator := rand.New(rand.NewSource(time.Now().UnixNano()))
+			for index := 0; index < queriesPerQueryer; index++ {
+				target := randomGenerator.Intn(numWriters * opsPerWriter)
 				
 				_, _, _ = users.FindByID(nil, target)
 				_, _, _ = products.FindByID(nil, fmt.Sprintf("p_%d", target))
@@ -319,98 +319,98 @@ func TestStressSyncMultiTable(t *testing.T) {
 		}()
 	}
 
-	wg.Wait()
+	waitGroup.Wait()
 
 	// Verify records
-	for i := 0; i < numWriters*opsPerWriter; i += 500 {
-		_, found, err := users.FindByID(nil, i)
+	for index := 0; index < numWriters*opsPerWriter; index += 500 {
+		_, found, err := users.FindByID(nil, index)
 		if err != nil || !found {
-			t.Fatalf("verification failed for user %d: found=%v, err=%v", i, found, err)
+			testingT.Fatalf("verification failed for user %d: found=%v, err=%v", index, found, err)
 		}
 	}
 }
 
-func TestStressAsyncMultiTable(t *testing.T) {
+func TestStressAsyncMultiTable(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-stress-async-multi-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.Durability = keeper.DurabilityAsync
-	opts.RegisterTypes(User{}, Order{}, Product{}, Review{})
+	options := keeper.DefaultOptions()
+	options.Durability = keeper.DurabilityAsync
+	options.RegisterTypes(User{}, Order{}, Product{}, Review{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
-	users, _ := keeper.GetTable[int, User](db, "users")
-	orders, _ := keeper.GetTable[string, Order](db, "orders")
-	products, _ := keeper.GetTable[string, Product](db, "products")
-	reviews, _ := keeper.GetTable[string, Review](db, "reviews")
+	users, _ := keeper.GetTable[int, User](database, "users")
+	orders, _ := keeper.GetTable[string, Order](database, "orders")
+	products, _ := keeper.GetTable[string, Product](database, "products")
+	reviews, _ := keeper.GetTable[string, Review](database, "reviews")
 
 	const numWriters = 10
 	const opsPerWriter = 25000 // 10 * 25000 * 4 tables = 1,000,000 structs saved
 	const numQueries = 10
 	const queriesPerQueryer = 5
 
-	var wg sync.WaitGroup
-	wg.Add(numWriters + numQueries)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(numWriters + numQueries)
 
 	// Writers performing mixed table insertions
-	for w := 0; w < numWriters; w++ {
+	for writerIndex := 0; writerIndex < numWriters; writerIndex++ {
 		go func(writerID int) {
-			defer wg.Done()
-			err := db.Transaction(func(tx *keeper.Transaction) error {
-				for i := 0; i < opsPerWriter; i++ {
-					id := writerID*opsPerWriter + i
+			defer waitGroup.Done()
+			err := database.Transaction(func(transaction *keeper.Transaction) error {
+				for index := 0; index < opsPerWriter; index++ {
+					userID := writerID*opsPerWriter + index
 					
-					_ = users.Insert(tx, User{
-						ID:    id,
-						Name:  fmt.Sprintf("User-%d", id),
-						Email: fmt.Sprintf("user-%d@example.com", id),
+					_ = users.Insert(transaction, User{
+						ID:    userID,
+						Name:  fmt.Sprintf("User-%d", userID),
+						Email: fmt.Sprintf("user-%d@example.com", userID),
 					})
 
-					pID := fmt.Sprintf("p_%d", id)
-					_ = products.Insert(tx, Product{
-						ID:    pID,
-						Title: fmt.Sprintf("Product-%d", id),
-						Price: float64(10 + id),
+					productID := fmt.Sprintf("p_%d", userID)
+					_ = products.Insert(transaction, Product{
+						ID:    productID,
+						Title: fmt.Sprintf("Product-%d", userID),
+						Price: float64(10 + userID),
 					})
 
-					oID := fmt.Sprintf("o_%d", id)
-					_ = orders.Insert(tx, Order{
-						ID:        oID,
-						UserID:    id,
-						Amount:    float64(50 + id),
+					orderID := fmt.Sprintf("o_%d", userID)
+					_ = orders.Insert(transaction, Order{
+						ID:        orderID,
+						UserID:    userID,
+						Amount:    float64(50 + userID),
 						CreatedAt: time.Now(),
 					})
 
-					rID := fmt.Sprintf("r_%d", id)
-					_ = reviews.Insert(tx, Review{
-						ID:        rID,
-						ProductID: pID,
+					reviewID := fmt.Sprintf("r_%d", userID)
+					_ = reviews.Insert(transaction, Review{
+						ID:        reviewID,
+						ProductID: productID,
 						Rating:    5,
 					})
 				}
 				return nil
 			})
 			if err != nil {
-				t.Errorf("writer transaction failed: %v", err)
+				testingT.Errorf("writer transaction failed: %v", err)
 			}
-		}(w)
+		}(writerIndex)
 	}
 
 	// Readers querying mixed tables
-	for r := 0; r < numQueries; r++ {
+	for readerIndex := 0; readerIndex < numQueries; readerIndex++ {
 		go func() {
-			defer wg.Done()
-			rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-			for i := 0; i < queriesPerQueryer; i++ {
-				target := rnd.Intn(numWriters * opsPerWriter)
+			defer waitGroup.Done()
+			randomGenerator := rand.New(rand.NewSource(time.Now().UnixNano()))
+			for index := 0; index < queriesPerQueryer; index++ {
+				target := randomGenerator.Intn(numWriters * opsPerWriter)
 				
 				_, _, _ = users.FindByID(nil, target)
 				_, _, _ = products.FindByID(nil, fmt.Sprintf("p_%d", target))
@@ -428,13 +428,13 @@ func TestStressAsyncMultiTable(t *testing.T) {
 		}()
 	}
 
-	wg.Wait()
+	waitGroup.Wait()
 
 	// Verify records
-	for i := 0; i < numWriters*opsPerWriter; i += 500 {
-		_, found, err := users.FindByID(nil, i)
+	for index := 0; index < numWriters*opsPerWriter; index += 500 {
+		_, found, err := users.FindByID(nil, index)
 		if err != nil || !found {
-			t.Fatalf("verification failed for user %d: found=%v, err=%v", i, found, err)
+			testingT.Fatalf("verification failed for user %d: found=%v, err=%v", index, found, err)
 		}
 	}
 }

@@ -12,21 +12,21 @@ import (
 	keeper "github.com/lemadane/masterkeeper"
 )
 
-func TestSQLiteMigrationIntegration(t *testing.T) {
+func TestSQLiteMigrationIntegration(testingT *testing.T) {
 	// 1. Setup masterkeeper database
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(MigrationUser{})
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(MigrationUser{})
 
-	dbDir := t.TempDir()
-	db, err := keeper.Open(dbDir, opts)
+	dbDir := testingT.TempDir()
+	database, err := keeper.Open(dbDir, options)
 	if err != nil {
-		t.Fatalf("failed to open masterkeeper: %v", err)
+		testingT.Fatalf("failed to open masterkeeper: %v", err)
 	}
 
-	table, err := keeper.GetTable[string, MigrationUser](db, "users")
+	userTable, err := keeper.GetTable[string, MigrationUser](database, "users")
 	if err != nil {
-		db.Close()
-		t.Fatalf("failed to get table: %v", err)
+		database.Close()
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
 	// 2. Insert test data in masterkeeper
@@ -60,89 +60,89 @@ func TestSQLiteMigrationIntegration(t *testing.T) {
 		},
 	}
 
-	err = db.Transaction(func(tx *keeper.Transaction) error {
-		if err := table.Insert(tx, testUser1); err != nil {
+	err = database.Transaction(func(transaction *keeper.Transaction) error {
+		if err := userTable.Insert(transaction, testUser1); err != nil {
 			return err
 		}
-		if err := table.Insert(tx, testUser2); err != nil {
+		if err := userTable.Insert(transaction, testUser2); err != nil {
 			return err
 		}
 		return nil
 	})
 	if err != nil {
-		db.Close()
-		t.Fatalf("failed to insert data: %v", err)
+		database.Close()
+		testingT.Fatalf("failed to insert data: %v", err)
 	}
 
 	// 3. Open SQLite Database
-	sqlitePath := filepath.Join(t.TempDir(), "test.db")
-	sqlDB, err := sql.Open("sqlite", sqlitePath)
+	sqlitePath := filepath.Join(testingT.TempDir(), "test.db")
+	sqlDatabase, err := sql.Open("sqlite", sqlitePath)
 	if err != nil {
-		db.Close()
-		t.Fatalf("failed to open SQLite connection: %v", err)
+		database.Close()
+		testingT.Fatalf("failed to open SQLite connection: %v", err)
 	}
-	defer sqlDB.Close()
+	defer sqlDatabase.Close()
 
 	// 4. Run Migration
-	err = keeper.Migrate(db, sqlDB, keeper.DialectSQLite)
+	err = keeper.Migrate(database, sqlDatabase, keeper.DialectSQLite)
 	if err != nil {
-		db.Close()
-		t.Fatalf("migration to SQLite failed: %v", err)
+		database.Close()
+		testingT.Fatalf("migration to SQLite failed: %v", err)
 	}
 
 	// Close masterkeeper
-	db.Close()
+	database.Close()
 
 	// 5. Query and Assert data from SQLite
-	rows, err := sqlDB.Query(`SELECT "ID", "Name", "Email", "Age", "Score", "Active", "Created", "Blob", "Metadata" FROM "users" ORDER BY "ID" ASC`)
+	rows, err := sqlDatabase.Query(`SELECT "ID", "Name", "Email", "Age", "Score", "Active", "Created", "Blob", "Metadata" FROM "users" ORDER BY "ID" ASC`)
 	if err != nil {
-		t.Fatalf("failed to query sqlite database: %v", err)
+		testingT.Fatalf("failed to query sqlite database: %v", err)
 	}
 	defer rows.Close()
 
 	var migratedUsers []MigrationUser
 	for rows.Next() {
-		var u MigrationUser
-		var createdStr string
+		var user MigrationUser
+		var createdString string
 		var blob []byte
 		var metadataJSON string
-		var activeInt int
+		var activeInteger int
 
 		err := rows.Scan(
-			&u.ID,
-			&u.Name,
-			&u.Email,
-			&u.Age,
-			&u.Score,
-			&activeInt,
-			&createdStr,
+			&user.ID,
+			&user.Name,
+			&user.Email,
+			&user.Age,
+			&user.Score,
+			&activeInteger,
+			&createdString,
 			&blob,
 			&metadataJSON,
 		)
 		if err != nil {
-			t.Fatalf("failed to scan sqlite row: %v", err)
+			testingT.Fatalf("failed to scan sqlite row: %v", err)
 		}
 
-		u.Active = activeInt != 0
-		u.Blob = blob
+		user.Active = activeInteger != 0
+		user.Blob = blob
 
 		// Parse created time
-		u.Created, err = time.Parse(time.RFC3339Nano, createdStr)
+		user.Created, err = time.Parse(time.RFC3339Nano, createdString)
 		if err != nil {
-			t.Fatalf("failed to parse created time: %v", err)
+			testingT.Fatalf("failed to parse created time: %v", err)
 		}
 
 		// Parse nested struct
-		err = json.Unmarshal([]byte(metadataJSON), &u.Metadata)
+		err = json.Unmarshal([]byte(metadataJSON), &user.Metadata)
 		if err != nil {
-			t.Fatalf("failed to unmarshal nested struct metadata: %v", err)
+			testingT.Fatalf("failed to unmarshal nested struct metadata: %v", err)
 		}
 
-		migratedUsers = append(migratedUsers, u)
+		migratedUsers = append(migratedUsers, user)
 	}
 
 	if len(migratedUsers) != 2 {
-		t.Fatalf("expected 2 users in sqlite, got %d", len(migratedUsers))
+		testingT.Fatalf("expected 2 users in sqlite, got %d", len(migratedUsers))
 	}
 
 	// Assert User 1
@@ -156,7 +156,7 @@ func TestSQLiteMigrationIntegration(t *testing.T) {
 		string(migratedUsers[0].Blob) != string(testUser1.Blob) ||
 		migratedUsers[0].Metadata.Tag != testUser1.Metadata.Tag ||
 		migratedUsers[0].Metadata.Score != testUser1.Metadata.Score {
-		t.Errorf("mismatch on user 1. Got: %+v, Want: %+v", migratedUsers[0], testUser1)
+		testingT.Errorf("mismatch on user 1. Got: %+v, Want: %+v", migratedUsers[0], testUser1)
 	}
 
 	// Assert User 2
@@ -170,6 +170,6 @@ func TestSQLiteMigrationIntegration(t *testing.T) {
 		string(migratedUsers[1].Blob) != string(testUser2.Blob) ||
 		migratedUsers[1].Metadata.Tag != testUser2.Metadata.Tag ||
 		migratedUsers[1].Metadata.Score != testUser2.Metadata.Score {
-		t.Errorf("mismatch on user 2. Got: %+v, Want: %+v", migratedUsers[1], testUser2)
+		testingT.Errorf("mismatch on user 2. Got: %+v, Want: %+v", migratedUsers[1], testUser2)
 	}
 }

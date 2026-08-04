@@ -31,7 +31,7 @@ func NewTableStorage(directory string, tableName string) (*TableStorage, error) 
 		return nil, fmt.Errorf("failed to open table file %s: %w", tablePath, err)
 	}
 
-	info, err := file.Stat()
+	fileInfo, err := file.Stat()
 	if err != nil {
 		file.Close()
 		return nil, fmt.Errorf("failed to stat table file %s: %w", tablePath, err)
@@ -40,98 +40,98 @@ func NewTableStorage(directory string, tableName string) (*TableStorage, error) 
 	return &TableStorage{
 		file:        file,
 		tablePath:   tablePath,
-		currentSize: info.Size(),
+		currentSize: fileInfo.Size(),
 	}, nil
 }
 
-func (s *TableStorage) AppendRecord(bytes []byte) (RecordPointer, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (tableStorage *TableStorage) AppendRecord(bytesValue []byte) (RecordPointer, error) {
+	tableStorage.mu.Lock()
+	defer tableStorage.mu.Unlock()
 
-	offset := s.currentSize
-	written, err := s.file.WriteAt(bytes, offset)
+	offset := tableStorage.currentSize
+	written, err := tableStorage.file.WriteAt(bytesValue, offset)
 	if err != nil {
 		return RecordPointer{}, err
 	}
 
-	ptr := RecordPointer{
+	recordPointer := RecordPointer{
 		Offset: offset,
 		Size:   int32(written),
 	}
-	s.currentSize += int64(written)
-	return ptr, nil
+	tableStorage.currentSize += int64(written)
+	return recordPointer, nil
 }
 
-func (s *TableStorage) AppendRecords(records [][]byte) ([]RecordPointer, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (tableStorage *TableStorage) AppendRecords(recordsSlice [][]byte) ([]RecordPointer, error) {
+	tableStorage.mu.Lock()
+	defer tableStorage.mu.Unlock()
 
 	var totalSize int
-	for _, r := range records {
-		totalSize += len(r)
+	for _, recordBytes := range recordsSlice {
+		totalSize += len(recordBytes)
 	}
 
-	buf := make([]byte, 0, totalSize)
-	var ptrs []RecordPointer
-	offset := s.currentSize
+	buffer := make([]byte, 0, totalSize)
+	var recordPointers []RecordPointer
+	offset := tableStorage.currentSize
 
-	for _, r := range records {
-		buf = append(buf, r...)
-		ptrs = append(ptrs, RecordPointer{
+	for _, recordBytes := range recordsSlice {
+		buffer = append(buffer, recordBytes...)
+		recordPointers = append(recordPointers, RecordPointer{
 			Offset: offset,
-			Size:   int32(len(r)),
+			Size:   int32(len(recordBytes)),
 		})
-		offset += int64(len(r))
+		offset += int64(len(recordBytes))
 	}
 
-	if len(buf) > 0 {
-		_, err := s.file.WriteAt(buf, s.currentSize)
+	if len(buffer) > 0 {
+		_, err := tableStorage.file.WriteAt(buffer, tableStorage.currentSize)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	s.currentSize = offset
-	return ptrs, nil
+	tableStorage.currentSize = offset
+	return recordPointers, nil
 }
 
-func (s *TableStorage) ReadRecord(ptr RecordPointer) ([]byte, error) {
-	buf := make([]byte, ptr.Size)
-	_, err := s.file.ReadAt(buf, ptr.Offset)
+func (tableStorage *TableStorage) ReadRecord(recordPointer RecordPointer) ([]byte, error) {
+	buffer := make([]byte, recordPointer.Size)
+	_, err := tableStorage.file.ReadAt(buffer, recordPointer.Offset)
 	if err != nil {
 		if err == io.EOF {
-			return nil, fmt.Errorf("unexpected EOF reading record at offset %d, size %d", ptr.Offset, ptr.Size)
+			return nil, fmt.Errorf("unexpected EOF reading record at offset %d, size %d", recordPointer.Offset, recordPointer.Size)
 		}
 		return nil, err
 	}
-	return buf, nil
+	return buffer, nil
 }
 
-func (s *TableStorage) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.file != nil {
-		err := s.file.Close()
-		s.file = nil
+func (tableStorage *TableStorage) Close() error {
+	tableStorage.mu.Lock()
+	defer tableStorage.mu.Unlock()
+	if tableStorage.file != nil {
+		err := tableStorage.file.Close()
+		tableStorage.file = nil
 		return err
 	}
 	return nil
 }
 
-func (s *TableStorage) Compact(activePointers map[any]RecordPointer) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (tableStorage *TableStorage) Compact(activePointers map[any]RecordPointer) error {
+	tableStorage.mu.Lock()
+	defer tableStorage.mu.Unlock()
 
-	compactPath := s.tablePath + ".compact"
+	compactPath := tableStorage.tablePath + ".compact"
 	_ = os.Remove(compactPath)
 
-	compactFile, err := os.OpenFile(compactPath, os.O_CREATE|os.O_RDWR, 0644)
+	compactedFile, err := os.OpenFile(compactPath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open compact file: %w", err)
 	}
 	defer func() {
-		if compactFile != nil {
-			compactFile.Close()
+		if compactedFile != nil {
+			compactedFile.Close()
 			_ = os.Remove(compactPath)
 		}
 	}()
@@ -139,57 +139,57 @@ func (s *TableStorage) Compact(activePointers map[any]RecordPointer) error {
 	var writeOffset int64
 	newPointers := make(map[any]RecordPointer)
 
-	for key, oldPtr := range activePointers {
+	for key, oldRecordPointer := range activePointers {
 		// Read record
-		buf := make([]byte, oldPtr.Size)
-		if _, err := s.file.ReadAt(buf, oldPtr.Offset); err != nil {
+		buffer := make([]byte, oldRecordPointer.Size)
+		if _, err := tableStorage.file.ReadAt(buffer, oldRecordPointer.Offset); err != nil {
 			return fmt.Errorf("compact failed to read record: %w", err)
 		}
 
 		// Write to compact file
-		if _, err := compactFile.WriteAt(buf, writeOffset); err != nil {
+		if _, err := compactedFile.WriteAt(buffer, writeOffset); err != nil {
 			return fmt.Errorf("compact failed to write record: %w", err)
 		}
 
 		newPointers[key] = RecordPointer{
 			Offset: writeOffset,
-			Size:   oldPtr.Size,
+			Size:   oldRecordPointer.Size,
 		}
-		writeOffset += int64(oldPtr.Size)
+		writeOffset += int64(oldRecordPointer.Size)
 	}
 
 	// Sync compact file
-	if err := compactFile.Sync(); err != nil {
+	if err := compactedFile.Sync(); err != nil {
 		return fmt.Errorf("compact failed to sync: %w", err)
 	}
 
 	// Close files and swap
-	compactFile.Close()
-	compactFile = nil // prevent defer cleanup from deleting the swapped file
+	compactedFile.Close()
+	compactedFile = nil // prevent defer cleanup from deleting the swapped file
 
-	if err := s.file.Close(); err != nil {
+	if err := tableStorage.file.Close(); err != nil {
 		return fmt.Errorf("failed to close table file for swap: %w", err)
 	}
-	s.file = nil
+	tableStorage.file = nil
 
-	if err := os.Rename(compactPath, s.tablePath); err != nil {
+	if err := os.Rename(compactPath, tableStorage.tablePath); err != nil {
 		return fmt.Errorf("failed to swap table file: %w", err)
 	}
 
 	// Reopen
-	file, err := os.OpenFile(s.tablePath, os.O_CREATE|os.O_RDWR, 0644)
+	file, err := os.OpenFile(tableStorage.tablePath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to reopen table file after swap: %w", err)
 	}
-	s.file = file
-	s.currentSize = writeOffset
+	tableStorage.file = file
+	tableStorage.currentSize = writeOffset
 
 	// Update activePointers in place
-	for k := range activePointers {
-		delete(activePointers, k)
+	for pointerKey := range activePointers {
+		delete(activePointers, pointerKey)
 	}
-	for k, v := range newPointers {
-		activePointers[k] = v
+	for pointerKey, newRecordPointer := range newPointers {
+		activePointers[pointerKey] = newRecordPointer
 	}
 
 	return nil

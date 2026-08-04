@@ -21,29 +21,29 @@ type Customer struct {
 	Joined time.Time
 }
 
-func TestKeeperCRUD(t *testing.T) {
+func TestKeeperCRUD(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-test-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(Customer{})
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
-	table, err := keeper.GetTable[string, Customer](db, "customers")
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
 	if err != nil {
-		t.Fatalf("failed to get table: %v", err)
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
 	joinedTime := time.Now().Truncate(time.Second)
-	c1 := Customer{
+	customer1 := Customer{
 		ID:     "cust_1",
 		Name:   "Alice",
 		Email:  "alice@example.com",
@@ -52,56 +52,56 @@ func TestKeeperCRUD(t *testing.T) {
 	}
 
 	// 1. Autocommit Insert
-	err = table.Insert(nil, c1)
+	err = customerTable.Insert(nil, customer1)
 	if err != nil {
-		t.Fatalf("failed to insert: %v", err)
+		testingT.Fatalf("failed to insert: %v", err)
 	}
 
 	// 2. Autocommit Find
-	got, found, err := table.FindByID(nil, "cust_1")
+	gotRecord, found, err := customerTable.FindByID(nil, "cust_1")
 	if err != nil {
-		t.Fatalf("failed to find: %v", err)
+		testingT.Fatalf("failed to find: %v", err)
 	}
 	if !found {
-		t.Fatalf("record not found")
+		testingT.Fatalf("record not found")
 	}
-	if got.Name != "Alice" || got.Age != 30 || !got.Joined.Equal(joinedTime) {
-		t.Errorf("unexpected record retrieved: %+v", got)
+	if gotRecord.Name != "Alice" || gotRecord.Age != 30 || !gotRecord.Joined.Equal(joinedTime) {
+		testingT.Errorf("unexpected record retrieved: %+v", gotRecord)
 	}
 
 	// 3. Autocommit Update
-	c1.Age = 31
-	err = table.Update(nil, c1)
+	customer1.Age = 31
+	err = customerTable.Update(nil, customer1)
 	if err != nil {
-		t.Fatalf("failed to update: %v", err)
+		testingT.Fatalf("failed to update: %v", err)
 	}
 
-	got, found, err = table.FindByID(nil, "cust_1")
+	gotRecord, found, err = customerTable.FindByID(nil, "cust_1")
 	if err != nil {
-		t.Fatalf("failed to find after update: %v", err)
+		testingT.Fatalf("failed to find after update: %v", err)
 	}
-	if !found || got.Age != 31 {
-		t.Errorf("update was not reflected: found=%v, age=%d", found, got.Age)
+	if !found || gotRecord.Age != 31 {
+		testingT.Errorf("update was not reflected: found=%v, age=%d", found, gotRecord.Age)
 	}
 
 	// 4. Transaction with Rollback
-	err = db.Transaction(func(tx *keeper.Transaction) error {
-		c2 := Customer{
+	err = database.Transaction(func(transaction *keeper.Transaction) error {
+		customer2 := Customer{
 			ID:    "cust_2",
 			Name:  "Bob",
 			Email: "bob@example.com",
 			Age:   25,
 		}
-		if err := table.Insert(tx, c2); err != nil {
+		if err := customerTable.Insert(transaction, customer2); err != nil {
 			return err
 		}
 
 		// Read your own writes inside transaction
-		r, foundInside, err := table.FindByID(tx, "cust_2")
+		record, foundInside, err := customerTable.FindByID(transaction, "cust_2")
 		if err != nil {
 			return err
 		}
-		if !foundInside || r.Name != "Bob" {
+		if !foundInside || record.Name != "Bob" {
 			return fmt.Errorf("bob not found inside transaction")
 		}
 
@@ -110,382 +110,382 @@ func TestKeeperCRUD(t *testing.T) {
 	})
 
 	if err == nil {
-		t.Fatalf("expected transaction to fail")
+		testingT.Fatalf("expected transaction to fail")
 	}
 
 	// Bob should not be found in the database
-	_, found, err = table.FindByID(nil, "cust_2")
+	_, found, err = customerTable.FindByID(nil, "cust_2")
 	if err != nil {
-		t.Fatalf("error finding bob: %v", err)
+		testingT.Fatalf("error finding bob: %v", err)
 	}
 	if found {
-		t.Fatalf("bob was found even though transaction rolled back")
+		testingT.Fatalf("bob was found even though transaction rolled back")
 	}
 
 	// 5. Transaction with Commit
-	err = db.Transaction(func(tx *keeper.Transaction) error {
-		c3 := Customer{
+	err = database.Transaction(func(transaction *keeper.Transaction) error {
+		customer3 := Customer{
 			ID:    "cust_3",
 			Name:  "Charlie",
 			Email: "charlie@example.com",
 			Age:   40,
 		}
-		return table.Insert(tx, c3)
+		return customerTable.Insert(transaction, customer3)
 	})
 
 	if err != nil {
-		t.Fatalf("transaction commit failed: %v", err)
+		testingT.Fatalf("transaction commit failed: %v", err)
 	}
 
-	got, found, err = table.FindByID(nil, "cust_3")
+	gotRecord, found, err = customerTable.FindByID(nil, "cust_3")
 	if err != nil {
-		t.Fatalf("error finding Charlie: %v", err)
+		testingT.Fatalf("error finding Charlie: %v", err)
 	}
-	if !found || got.Name != "Charlie" {
-		t.Fatalf("charlie was not found after commit")
+	if !found || gotRecord.Name != "Charlie" {
+		testingT.Fatalf("charlie was not found after commit")
 	}
 }
 
-func TestUniqueIndexConstraints(t *testing.T) {
+func TestUniqueIndexConstraints(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-test-unique-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(Customer{})
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
-	table, err := keeper.GetTable[string, Customer](db, "customers")
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
 	if err != nil {
-		t.Fatalf("failed to get table: %v", err)
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
-	c1 := Customer{
+	customer1 := Customer{
 		ID:    "cust_1",
 		Name:  "Alice",
 		Email: "dup@example.com",
 		Age:   30,
 	}
-	c2 := Customer{
+	customer2 := Customer{
 		ID:    "cust_2",
 		Name:  "Bob",
 		Email: "dup@example.com", // duplicate email
 		Age:   25,
 	}
 
-	err = table.Insert(nil, c1)
+	err = customerTable.Insert(nil, customer1)
 	if err != nil {
-		t.Fatalf("failed to insert c1: %v", err)
+		testingT.Fatalf("failed to insert customer1: %v", err)
 	}
 
-	// Attempting to insert c2 with duplicate email must fail
-	err = table.Insert(nil, c2)
+	// Attempting to insert customer2 with duplicate email must fail
+	err = customerTable.Insert(nil, customer2)
 	if err == nil {
-		t.Fatalf("expected duplicate unique index violation, but it succeeded")
+		testingT.Fatalf("expected duplicate unique index violation, but it succeeded")
 	}
 
 	// Ensure error is type of ErrDuplicateIndex
 	var dupErr *keeper.ErrDuplicateIndex
 	if !errorsAs(err, &dupErr) {
-		t.Errorf("expected ErrDuplicateIndex, got: %T (%v)", err, err)
+		testingT.Errorf("expected ErrDuplicateIndex, got: %T (%v)", err, err)
 	}
 }
 
-func TestRecovery(t *testing.T) {
+func TestRecovery(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-test-recovery-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(Customer{})
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
 
-	// 1. Populate and close db
-	db, err := keeper.Open(tempDir, opts)
+	// 1. Populate and close database
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
 
-	table, err := keeper.GetTable[string, Customer](db, "customers")
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
 	if err != nil {
-		db.Close()
-		t.Fatalf("failed to get table: %v", err)
+		database.Close()
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
-	c1 := Customer{
+	customer1 := Customer{
 		ID:    "cust_1",
 		Name:  "Alice",
 		Email: "alice@example.com",
 		Age:   30,
 	}
-	if err := table.Insert(nil, c1); err != nil {
-		db.Close()
-		t.Fatalf("failed to insert: %v", err)
+	if err := customerTable.Insert(nil, customer1); err != nil {
+		database.Close()
+		testingT.Fatalf("failed to insert: %v", err)
 	}
 
-	db.Close()
+	database.Close()
 
 	// 2. Reopen and verify data recovered from WAL
-	db2, err := keeper.Open(tempDir, opts)
+	database2, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to reopen database: %v", err)
+		testingT.Fatalf("failed to reopen database: %v", err)
 	}
-	defer db2.Close()
+	defer database2.Close()
 
-	table2, err := keeper.GetTable[string, Customer](db2, "customers")
+	customerTable2, err := keeper.GetTable[string, Customer](database2, "customers")
 	if err != nil {
-		t.Fatalf("failed to get table: %v", err)
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
-	got, found, err := table2.FindByID(nil, "cust_1")
+	gotRecord, found, err := customerTable2.FindByID(nil, "cust_1")
 	if err != nil {
-		t.Fatalf("failed to find recovered record: %v", err)
+		testingT.Fatalf("failed to find recovered record: %v", err)
 	}
 	if !found {
-		t.Fatalf("recovered record not found")
+		testingT.Fatalf("recovered record not found")
 	}
-	if got.Name != "Alice" || got.Age != 30 {
-		t.Errorf("incorrect recovered record: %+v", got)
+	if gotRecord.Name != "Alice" || gotRecord.Age != 30 {
+		testingT.Errorf("incorrect recovered record: %+v", gotRecord)
 	}
 }
 
-func TestCompaction(t *testing.T) {
+func TestCompaction(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-test-compaction-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(Customer{})
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
 
-	table, err := keeper.GetTable[string, Customer](db, "customers")
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
 	if err != nil {
-		db.Close()
-		t.Fatalf("failed to get table: %v", err)
+		database.Close()
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
-	c1 := Customer{ID: "c1", Name: "Alice", Email: "alice@example.com"}
-	_ = table.Insert(nil, c1)
+	customer1 := Customer{ID: "c1", Name: "Alice", Email: "alice@example.com"}
+	_ = customerTable.Insert(nil, customer1)
 
-	// Update c1 multiple times to generate stale records
-	for i := 0; i < 5; i++ {
-		c1.Age = 20 + i
-		_ = table.Update(nil, c1)
+	// Update customer1 multiple times to generate stale records
+	for index := 0; index < 5; index++ {
+		customer1.Age = 20 + index
+		_ = customerTable.Update(nil, customer1)
 	}
 
 	// compact
-	if err := db.Compact(); err != nil {
-		db.Close()
-		t.Fatalf("compaction failed: %v", err)
+	if err := database.Compact(); err != nil {
+		database.Close()
+		testingT.Fatalf("compaction failed: %v", err)
 	}
 
-	db.Close()
+	database.Close()
 
 	// Reopen and check
-	db2, err := keeper.Open(tempDir, opts)
+	database2, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to reopen after compaction: %v", err)
+		testingT.Fatalf("failed to reopen after compaction: %v", err)
 	}
-	defer db2.Close()
+	defer database2.Close()
 
-	table2, err := keeper.GetTable[string, Customer](db2, "customers")
+	customerTable2, err := keeper.GetTable[string, Customer](database2, "customers")
 	if err != nil {
-		t.Fatalf("failed to get table after compaction: %v", err)
+		testingT.Fatalf("failed to get table after compaction: %v", err)
 	}
 
-	got, found, err := table2.FindByID(nil, "c1")
+	gotRecord, found, err := customerTable2.FindByID(nil, "c1")
 	if err != nil {
-		t.Fatalf("failed to find after compaction: %v", err)
+		testingT.Fatalf("failed to find after compaction: %v", err)
 	}
-	if !found || got.Age != 24 {
-		t.Fatalf("record not found or incorrect state: found=%v, age=%d", found, got.Age)
+	if !found || gotRecord.Age != 24 {
+		testingT.Fatalf("record not found or incorrect state: found=%v, age=%d", found, gotRecord.Age)
 	}
 }
 
-func TestQuery(t *testing.T) {
+func TestQuery(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-test-query-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(Customer{})
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
-	table, err := keeper.GetTable[string, Customer](db, "customers")
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
 	if err != nil {
-		t.Fatalf("failed to get table: %v", err)
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
-	_ = table.Insert(nil, Customer{ID: "c1", Name: "Alice", Email: "alice@example.com", Age: 30})
-	_ = table.Insert(nil, Customer{ID: "c2", Name: "Bob", Email: "bob@example.com", Age: 25})
-	_ = table.Insert(nil, Customer{ID: "c3", Name: "Charlie", Email: "charlie@example.com", Age: 35})
+	_ = customerTable.Insert(nil, Customer{ID: "c1", Name: "Alice", Email: "alice@example.com", Age: 30})
+	_ = customerTable.Insert(nil, Customer{ID: "c2", Name: "Bob", Email: "bob@example.com", Age: 25})
+	_ = customerTable.Insert(nil, Customer{ID: "c3", Name: "Charlie", Email: "charlie@example.com", Age: 35})
 
 	// 1. Where Age >= 30, Sort by Age Desc
-	q := table.Query(nil).
+	queryVal := customerTable.Query(nil).
 		Where(keeper.Ge("Age", 30)).
 		OrderBy(keeper.Desc("Age"))
 
-	res, err := q.List()
+	results, err := queryVal.List()
 	if err != nil {
-		t.Fatalf("query failed: %v", err)
+		testingT.Fatalf("query failed: %v", err)
 	}
-	if len(res) != 2 {
-		t.Fatalf("expected 2 records, got %d", len(res))
+	if len(results) != 2 {
+		testingT.Fatalf("expected 2 records, got %d", len(results))
 	}
-	if res[0].ID != "c3" || res[1].ID != "c1" {
-		t.Errorf("incorrect sort or filter: %+v", res)
+	if results[0].ID != "c3" || results[1].ID != "c1" {
+		testingT.Errorf("incorrect sort or filter: %+v", results)
 	}
 
 	// Explain
-	plan := q.Explain()
+	plan := queryVal.Explain()
 	if plan.Strategy == "" {
-		t.Errorf("explain strategy is empty")
+		testingT.Errorf("explain strategy is empty")
 	}
 
 	// 2. Limit and Offset
-	res2, err := table.Query(nil).
+	results2, err := customerTable.Query(nil).
 		OrderBy(keeper.Asc("Age")).
 		Offset(1).
 		Limit(1).
 		List()
 
 	if err != nil {
-		t.Fatalf("query failed: %v", err)
+		testingT.Fatalf("query failed: %v", err)
 	}
-	if len(res2) != 1 || res2[0].ID != "c1" {
-		t.Errorf("limit/offset failed, got: %+v", res2)
+	if len(results2) != 1 || results2[0].ID != "c1" {
+		testingT.Errorf("limit/offset failed, got: %+v", results2)
 	}
 }
 
-func TestJSONExportImport(t *testing.T) {
+func TestJSONExportImport(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-test-json-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(Customer{})
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
 
-	table, err := keeper.GetTable[string, Customer](db, "customers")
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
 	if err != nil {
-		db.Close()
-		t.Fatalf("failed to get table: %v", err)
+		database.Close()
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
-	_ = table.Insert(nil, Customer{ID: "c1", Name: "Alice", Email: "alice@example.com", Age: 30})
-	_ = table.Insert(nil, Customer{ID: "c2", Name: "Bob", Email: "bob@example.com", Age: 25})
+	_ = customerTable.Insert(nil, Customer{ID: "c1", Name: "Alice", Email: "alice@example.com", Age: 30})
+	_ = customerTable.Insert(nil, Customer{ID: "c2", Name: "Bob", Email: "bob@example.com", Age: 25})
 
 	jsonPath := filepath.Join(tempDir, "export.json")
-	if err := db.ExportJSON(jsonPath); err != nil {
-		db.Close()
-		t.Fatalf("failed to export JSON: %v", err)
+	if err := database.ExportJSON(jsonPath); err != nil {
+		database.Close()
+		testingT.Fatalf("failed to export JSON: %v", err)
 	}
 
-	db.Close()
+	database.Close()
 
 	// Reopen a fresh database and import JSON
 	tempDir2, _ := os.MkdirTemp("", "keeper-test-json-import-*")
 	defer os.RemoveAll(tempDir2)
 
-	db2, err := keeper.Open(tempDir2, opts)
+	database2, err := keeper.Open(tempDir2, options)
 	if err != nil {
-		t.Fatalf("failed to open db2: %v", err)
+		testingT.Fatalf("failed to open database2: %v", err)
 	}
-	defer db2.Close()
+	defer database2.Close()
 
 	// Get table registers metadata
-	table2, _ := keeper.GetTable[string, Customer](db2, "customers")
+	customerTable2, _ := keeper.GetTable[string, Customer](database2, "customers")
 
-	if err := db2.ImportJSON(jsonPath); err != nil {
-		t.Fatalf("failed to import JSON: %v", err)
+	if err := database2.ImportJSON(jsonPath); err != nil {
+		testingT.Fatalf("failed to import JSON: %v", err)
 	}
 
 	// Verify imported data
-	got, found, _ := table2.FindByID(nil, "c1")
-	if !found || got.Name != "Alice" {
-		t.Fatalf("imported record c1 not found or invalid: %+v", got)
+	gotRecord, found, _ := customerTable2.FindByID(nil, "c1")
+	if !found || gotRecord.Name != "Alice" {
+		testingT.Fatalf("imported record c1 not found or invalid: %+v", gotRecord)
 	}
 }
 
-func TestAsyncAndBatchedDurability(t *testing.T) {
+func TestAsyncAndBatchedDurability(testingT *testing.T) {
 	for _, mode := range []keeper.DurabilityMode{keeper.DurabilityAsync, keeper.DurabilityBatched} {
-		t.Run(fmt.Sprintf("Mode_%d", mode), func(t *testing.T) {
+		testingT.Run(fmt.Sprintf("Mode_%d", mode), func(t *testing.T) {
 			tempDir, err := os.MkdirTemp("", "keeper-test-durability-*")
 			if err != nil {
-				t.Fatalf("failed to create temp dir: %v", err)
+				testingT.Fatalf("failed to create temp dir: %v", err)
 			}
 			defer os.RemoveAll(tempDir)
 
-			opts := keeper.DefaultOptions()
-			opts.Durability = mode
-			opts.RegisterTypes(Customer{})
+			options := keeper.DefaultOptions()
+			options.Durability = mode
+			options.RegisterTypes(Customer{})
 
-			db, err := keeper.Open(tempDir, opts)
+			database, err := keeper.Open(tempDir, options)
 			if err != nil {
-				t.Fatalf("failed to open database: %v", err)
+				testingT.Fatalf("failed to open database: %v", err)
 			}
 
-			table, err := keeper.GetTable[string, Customer](db, "customers")
+			customerTable, err := keeper.GetTable[string, Customer](database, "customers")
 			if err != nil {
-				db.Close()
-				t.Fatalf("failed to get table: %v", err)
+				database.Close()
+				testingT.Fatalf("failed to get table: %v", err)
 			}
 
 			// Concurrent inserts
 			const numGoroutines = 10
-			var wg syncWaitGroup
-			wg.Add(numGoroutines)
-			for i := 0; i < numGoroutines; i++ {
+			var syncWaitGroup syncWaitGroup
+			syncWaitGroup.Add(numGoroutines)
+			for index := 0; index < numGoroutines; index++ {
 				go func(idx int) {
-					defer wg.Done()
+					defer syncWaitGroup.Done()
 					c := Customer{
 						ID:    fmt.Sprintf("c_%d", idx),
 						Name:  fmt.Sprintf("User_%d", idx),
 						Email: fmt.Sprintf("user_%d@example.com", idx),
 						Age:   20 + idx,
 					}
-					_ = table.Insert(nil, c)
-				}(i)
+					_ = customerTable.Insert(nil, c)
+				}(index)
 			}
-			wg.Wait()
+			syncWaitGroup.Wait()
 
 			// Check all records exist
-			for i := 0; i < numGoroutines; i++ {
-				_, found, err := table.FindByID(nil, fmt.Sprintf("c_%d", i))
+			for index := 0; index < numGoroutines; index++ {
+				_, found, err := customerTable.FindByID(nil, fmt.Sprintf("c_%d", index))
 				if err != nil || !found {
-					db.Close()
-					t.Fatalf("expected record c_%d to be found (err=%v)", i, err)
+					database.Close()
+					testingT.Fatalf("expected record c_%d to be found (err=%v)", index, err)
 				}
 			}
 
-			db.Close()
+			database.Close()
 		})
 	}
 }
@@ -505,11 +505,11 @@ func errorsAs(err error, target any) bool {
 	if err == nil {
 		return false
 	}
-	val := reflect.ValueOf(target)
-	if val.Kind() != reflect.Ptr || val.IsNil() {
+	reflectValue := reflect.ValueOf(target)
+	if reflectValue.Kind() != reflect.Ptr || reflectValue.IsNil() {
 		panic("errorsAs target must be a non-nil pointer")
 	}
-	targetType := val.Type().Elem()
+	targetType := reflectValue.Type().Elem()
 	if targetType.Kind() != reflect.Ptr && targetType.Kind() != reflect.Interface {
 		panic("errorsAs target must be a pointer to an interface or a pointer to a struct implementing error")
 	}
@@ -517,94 +517,94 @@ func errorsAs(err error, target any) bool {
 	// Direct type assertion check
 	errVal := reflect.ValueOf(err)
 	if errVal.Type().AssignableTo(targetType) {
-		val.Elem().Set(errVal)
+		reflectValue.Elem().Set(errVal)
 		return true
 	}
 	
 	return false
 }
 
-func TestHotBackup(t *testing.T) {
+func TestHotBackup(testingT *testing.T) {
 	dir, err := os.MkdirTemp("", "keeper-backup-src-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(dir)
 
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(Customer{})
-	db, err := keeper.Open(dir, opts)
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
+	database, err := keeper.Open(dir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
-	defer db.Close()
+	defer database.Close()
 
-	table, err := keeper.GetTable[string, Customer](db, "customers")
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
 	if err != nil {
-		t.Fatalf("failed to get table: %v", err)
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
 	// Insert some records
-	err = db.Transaction(func(tx *keeper.Transaction) error {
-		c1 := Customer{ID: "c1", Name: "Alice", Email: "alice@example.com", Age: 30}
-		c2 := Customer{ID: "c2", Name: "Bob", Email: "bob@example.com", Age: 35}
-		if err := table.Insert(tx, c1); err != nil {
+	err = database.Transaction(func(transaction *keeper.Transaction) error {
+		customer1 := Customer{ID: "c1", Name: "Alice", Email: "alice@example.com", Age: 30}
+		customer2 := Customer{ID: "c2", Name: "Bob", Email: "bob@example.com", Age: 35}
+		if err := customerTable.Insert(transaction, customer1); err != nil {
 			return err
 		}
-		if err := table.Insert(tx, c2); err != nil {
+		if err := customerTable.Insert(transaction, customer2); err != nil {
 			return err
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("failed transaction: %v", err)
+		testingT.Fatalf("failed transaction: %v", err)
 	}
 
 	// Create backup dir
 	backupDir, err := os.MkdirTemp("", "keeper-backup-dest-*")
 	if err != nil {
-		t.Fatalf("failed to create backup temp dir: %v", err)
+		testingT.Fatalf("failed to create backup temp dir: %v", err)
 	}
 	defer os.RemoveAll(backupDir)
 
 	// Perform backup
-	if err := db.Backup(backupDir); err != nil {
-		t.Fatalf("failed to backup database: %v", err)
+	if err := database.Backup(backupDir); err != nil {
+		testingT.Fatalf("failed to backup database: %v", err)
 	}
 
 	// Open the backed up database to verify consistency
-	backupDB, err := keeper.Open(backupDir, opts)
+	backupDatabase, err := keeper.Open(backupDir, options)
 	if err != nil {
-		t.Fatalf("failed to open backed up database: %v", err)
+		testingT.Fatalf("failed to open backed up database: %v", err)
 	}
-	defer backupDB.Close()
+	defer backupDatabase.Close()
 
-	backupTable, err := keeper.GetTable[string, Customer](backupDB, "customers")
+	backupTable, err := keeper.GetTable[string, Customer](backupDatabase, "customers")
 	if err != nil {
-		t.Fatalf("failed to get table in backup DB: %v", err)
+		testingT.Fatalf("failed to get table in backup database: %v", err)
 	}
 
 	// Verify records are present
-	c1Back, found, err := backupTable.FindByID(nil, "c1")
+	customer1Back, found, err := backupTable.FindByID(nil, "c1")
 	if err != nil {
-		t.Fatalf("failed query on backup table: %v", err)
+		testingT.Fatalf("failed query on backup table: %v", err)
 	}
 	if !found {
-		t.Fatalf("customer c1 not found in backup table")
+		testingT.Fatalf("customer c1 not found in backup table")
 	}
-	if c1Back.Name != "Alice" || c1Back.Age != 30 {
-		t.Errorf("incorrect data in backup customer c1: %+v", c1Back)
+	if customer1Back.Name != "Alice" || customer1Back.Age != 30 {
+		testingT.Errorf("incorrect data in backup customer c1: %+v", customer1Back)
 	}
 
-	c2Back, found, err := backupTable.FindByID(nil, "c2")
+	customer2Back, found, err := backupTable.FindByID(nil, "c2")
 	if err != nil {
-		t.Fatalf("failed query on backup table: %v", err)
+		testingT.Fatalf("failed query on backup table: %v", err)
 	}
 	if !found {
-		t.Fatalf("customer c2 not found in backup table")
+		testingT.Fatalf("customer c2 not found in backup table")
 	}
-	if c2Back.Name != "Bob" || c2Back.Age != 35 {
-		t.Errorf("incorrect data in backup customer c2: %+v", c2Back)
+	if customer2Back.Name != "Bob" || customer2Back.Age != 35 {
+		testingT.Errorf("incorrect data in backup customer c2: %+v", customer2Back)
 	}
 }
 
@@ -613,7 +613,7 @@ type BigIntIDRecord struct {
 	Name string
 }
 
-func TestInt64SerializationRegression(t *testing.T) {
+func TestInt64SerializationRegression(testingT *testing.T) {
 	testValues := []int{
 		math.MaxInt,
 		math.MinInt,
@@ -624,97 +624,97 @@ func TestInt64SerializationRegression(t *testing.T) {
 	}
 
 	for _, val := range testValues {
-		t.Run(fmt.Sprintf("val_%d", val), func(t *testing.T) {
+		testingT.Run(fmt.Sprintf("val_%d", val), func(t *testing.T) {
 			tempDir, err := os.MkdirTemp("", "keeper-test-int64-*")
 			if err != nil {
-				t.Fatalf("failed to create temp dir: %v", err)
+				testingT.Fatalf("failed to create temp dir: %v", err)
 			}
 			defer os.RemoveAll(tempDir)
 
-			opts := keeper.DefaultOptions()
-			opts.RegisterTypes(BigIntIDRecord{})
+			options := keeper.DefaultOptions()
+			options.RegisterTypes(BigIntIDRecord{})
 
 			// 1. Open Database
-			db, err := keeper.Open(tempDir, opts)
+			database, err := keeper.Open(tempDir, options)
 			if err != nil {
-				t.Fatalf("failed to open database: %v", err)
+				testingT.Fatalf("failed to open database: %v", err)
 			}
 
-			table, err := keeper.GetTable[int, BigIntIDRecord](db, "big_ints")
+			table, err := keeper.GetTable[int, BigIntIDRecord](database, "big_ints")
 			if err != nil {
-				db.Close()
-				t.Fatalf("failed to get table: %v", err)
+				database.Close()
+				testingT.Fatalf("failed to get table: %v", err)
 			}
 
 			// 2. Insert record
-			rec := BigIntIDRecord{
+			record := BigIntIDRecord{
 				ID:   val,
 				Name: "TestRecord",
 			}
-			err = table.Insert(nil, rec)
+			err = table.Insert(nil, record)
 			if err != nil {
-				db.Close()
-				t.Fatalf("failed to insert: %v", err)
+				database.Close()
+				testingT.Fatalf("failed to insert: %v", err)
 			}
 
 			// 3. Close database
-			db.Close()
+			database.Close()
 
 			// 4. Reopen database
-			db2, err := keeper.Open(tempDir, opts)
+			database2, err := keeper.Open(tempDir, options)
 			if err != nil {
-				t.Fatalf("failed to reopen database: %v", err)
+				testingT.Fatalf("failed to reopen database: %v", err)
 			}
-			defer db2.Close()
+			defer database2.Close()
 
-			table2, err := keeper.GetTable[int, BigIntIDRecord](db2, "big_ints")
+			table2, err := keeper.GetTable[int, BigIntIDRecord](database2, "big_ints")
 			if err != nil {
-				t.Fatalf("failed to get table: %v", err)
+				testingT.Fatalf("failed to get table: %v", err)
 			}
 
 			// 5. Find by original ID
-			got, found, err := table2.FindByID(nil, val)
+			gotRecord, found, err := table2.FindByID(nil, val)
 			if err != nil {
-				t.Fatalf("failed to find record: %v", err)
+				testingT.Fatalf("failed to find record: %v", err)
 			}
 			if !found {
-				t.Fatalf("record not found")
+				testingT.Fatalf("record not found")
 			}
 
 			// Verify decoded ID is unchanged
-			if got.ID != val {
-				t.Errorf("expected ID %d, got %d", val, got.ID)
+			if gotRecord.ID != val {
+				testingT.Errorf("expected ID %d, got %d", val, gotRecord.ID)
 			}
 
 			// 6. Test update and deletion using that ID
-			got.Name = "UpdatedRecord"
-			err = table2.Update(nil, got)
+			gotRecord.Name = "UpdatedRecord"
+			err = table2.Update(nil, gotRecord)
 			if err != nil {
-				t.Fatalf("failed to update record: %v", err)
+				testingT.Fatalf("failed to update record: %v", err)
 			}
 
 			gotUpdated, foundUpdated, err := table2.FindByID(nil, val)
 			if err != nil {
-				t.Fatalf("failed to find updated record: %v", err)
+				testingT.Fatalf("failed to find updated record: %v", err)
 			}
 			if !foundUpdated || gotUpdated.Name != "UpdatedRecord" {
-				t.Fatalf("update not reflected or record lost: found=%v, name=%s", foundUpdated, gotUpdated.Name)
+				testingT.Fatalf("update not reflected or record lost: found=%v, name=%s", foundUpdated, gotUpdated.Name)
 			}
 
 			deleted, err := table2.DeleteByID(nil, val)
 			if err != nil {
-				t.Fatalf("failed to delete record: %v", err)
+				testingT.Fatalf("failed to delete record: %v", err)
 			}
 			if !deleted {
-				t.Fatalf("expected delete to return true")
+				testingT.Fatalf("expected delete to return true")
 			}
 
 			_, foundDeleted, err := table2.FindByID(nil, val)
 			if err != nil {
-				t.Fatalf("failed to find deleted record: %v", err)
+				testingT.Fatalf("failed to find deleted record: %v", err)
 			}
 			if foundDeleted {
-				t.Fatalf("record still exists after deletion")
+				testingT.Fatalf("record still exists after deletion")
 			}
 
 			// 7. Confirm overflow into int8, int16, or int32 returns an error
@@ -723,7 +723,7 @@ func TestInt64SerializationRegression(t *testing.T) {
 			}
 			data, err := keeper.Marshal(LargeValStruct{Val: val})
 			if err != nil {
-				t.Fatalf("failed to marshal large val struct: %v", err)
+				testingT.Fatalf("failed to marshal large val struct: %v", err)
 			}
 
 			// Check int8 overflow
@@ -731,9 +731,9 @@ func TestInt64SerializationRegression(t *testing.T) {
 				var t8 struct{ Val int8 }
 				err8 := keeper.Unmarshal(data, &t8)
 				if err8 == nil {
-					t.Errorf("expected overflow error casting %d to int8, but got nil", val)
+					testingT.Errorf("expected overflow error casting %d to int8, but got nil", val)
 				} else if !strings.Contains(err8.Error(), "overflows") {
-					t.Errorf("expected error message to contain 'overflows', got: %v", err8)
+					testingT.Errorf("expected error message to contain 'overflows', got: %v", err8)
 				}
 			}
 
@@ -742,9 +742,9 @@ func TestInt64SerializationRegression(t *testing.T) {
 				var t16 struct{ Val int16 }
 				err16 := keeper.Unmarshal(data, &t16)
 				if err16 == nil {
-					t.Errorf("expected overflow error casting %d to int16, but got nil", val)
+					testingT.Errorf("expected overflow error casting %d to int16, but got nil", val)
 				} else if !strings.Contains(err16.Error(), "overflows") {
-					t.Errorf("expected error message to contain 'overflows', got: %v", err16)
+					testingT.Errorf("expected error message to contain 'overflows', got: %v", err16)
 				}
 			}
 
@@ -753,9 +753,9 @@ func TestInt64SerializationRegression(t *testing.T) {
 				var t32 struct{ Val int32 }
 				err32 := keeper.Unmarshal(data, &t32)
 				if err32 == nil {
-					t.Errorf("expected overflow error casting %d to int32, but got nil", val)
+					testingT.Errorf("expected overflow error casting %d to int32, but got nil", val)
 				} else if !strings.Contains(err32.Error(), "overflows") {
-					t.Errorf("expected error message to contain 'overflows', got: %v", err32)
+					testingT.Errorf("expected error message to contain 'overflows', got: %v", err32)
 				}
 			}
 		})
@@ -769,80 +769,80 @@ type UserRecord struct {
 	Name string
 }
 
-func TestInt64E2E(t *testing.T) {
+func TestInt64E2E(testingT *testing.T) {
 	tempDir, err := os.MkdirTemp("", "keeper-test-e2e-*")
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		testingT.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	opts := keeper.DefaultOptions()
-	opts.RegisterTypes(UserRecord{})
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(UserRecord{})
 
-	db, err := keeper.Open(tempDir, opts)
+	database, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to open database: %v", err)
+		testingT.Fatalf("failed to open database: %v", err)
 	}
 
-	table, err := keeper.GetTable[UserID, UserRecord](db, "users")
+	table, err := keeper.GetTable[UserID, UserRecord](database, "users")
 	if err != nil {
-		db.Close()
-		t.Fatalf("failed to get table: %v", err)
+		database.Close()
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
 	// Test named type values
 	val := UserID(1 << 40)
 	err = table.Insert(nil, UserRecord{ID: val, Name: "Alice"})
 	if err != nil {
-		db.Close()
-		t.Fatalf("failed to insert: %v", err)
+		database.Close()
+		testingT.Fatalf("failed to insert: %v", err)
 	}
 
-	db.Close()
+	database.Close()
 
 	// Reopen
-	db2, err := keeper.Open(tempDir, opts)
+	database2, err := keeper.Open(tempDir, options)
 	if err != nil {
-		t.Fatalf("failed to reopen database: %v", err)
+		testingT.Fatalf("failed to reopen database: %v", err)
 	}
-	defer db2.Close()
+	defer database2.Close()
 
-	table2, err := keeper.GetTable[UserID, UserRecord](db2, "users")
+	table2, err := keeper.GetTable[UserID, UserRecord](database2, "users")
 	if err != nil {
-		t.Fatalf("failed to get table: %v", err)
+		testingT.Fatalf("failed to get table: %v", err)
 	}
 
-	got, found, err := table2.FindByID(nil, val)
+	gotRecord, found, err := table2.FindByID(nil, val)
 	if err != nil {
-		t.Fatalf("failed to find: %v", err)
+		testingT.Fatalf("failed to find: %v", err)
 	}
 	if !found {
-		t.Fatalf("not found")
+		testingT.Fatalf("not found")
 	}
-	if got.ID != val || got.Name != "Alice" {
-		t.Errorf("unexpected record: %+v", got)
+	if gotRecord.ID != val || gotRecord.Name != "Alice" {
+		testingT.Errorf("unexpected record: %+v", gotRecord)
 	}
 
 	// Update
-	got.Name = "Bob"
-	err = table2.Update(nil, got)
+	gotRecord.Name = "Bob"
+	err = table2.Update(nil, gotRecord)
 	if err != nil {
-		t.Fatalf("failed to update: %v", err)
+		testingT.Fatalf("failed to update: %v", err)
 	}
 
-	got2, found2, _ := table2.FindByID(nil, val)
-	if !found2 || got2.Name != "Bob" {
-		t.Errorf("update failed")
+	gotRecord2, found2, _ := table2.FindByID(nil, val)
+	if !found2 || gotRecord2.Name != "Bob" {
+		testingT.Errorf("update failed")
 	}
 
 	// Delete
 	deleted, err := table2.DeleteByID(nil, val)
 	if err != nil || !deleted {
-		t.Fatalf("failed to delete")
+		testingT.Fatalf("failed to delete")
 	}
 
 	_, found3, _ := table2.FindByID(nil, val)
 	if found3 {
-		t.Errorf("record still exists after delete")
+		testingT.Errorf("record still exists after delete")
 	}
 }
