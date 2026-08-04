@@ -161,7 +161,12 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 		return ErrInvalidTableName
 	}
 
-	if _, found := database.tableMetadataMap.Load(tableName); found {
+	if val, found := database.tableMetadataMap.Load(tableName); found {
+		meta := val.(TableMetadata)
+		if meta.IdType != idType || meta.Type != entityType {
+			return fmt.Errorf("%w: expected ID %s and entity %s, got ID %s and entity %s",
+				ErrIncompatibleTypes, meta.IdType.String(), meta.Type.String(), idType.String(), entityType.String())
+		}
 		return nil
 	}
 
@@ -173,7 +178,12 @@ func (database *Database) registerTableMetadata(tableName string, idType reflect
 	}
 
 	// Double check
-	if _, found := database.tableMetadataMap.Load(tableName); found {
+	if val, found := database.tableMetadataMap.Load(tableName); found {
+		meta := val.(TableMetadata)
+		if meta.IdType != idType || meta.Type != entityType {
+			return fmt.Errorf("%w: expected ID %s and entity %s, got ID %s and entity %s",
+				ErrIncompatibleTypes, meta.IdType.String(), meta.Type.String(), idType.String(), entityType.String())
+		}
 		return nil
 	}
 
@@ -462,6 +472,13 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 	}
 	currentGen := databaseState.Generation
 
+	clearedTables := make(map[string]bool)
+	if initialState != nil {
+		for tableName := range initialState.Tables {
+			clearedTables[tableName] = true
+		}
+	}
+
 	for _, txID := range activeCommits {
 		walRecordsGroup := txGroups[txID]
 		for _, walRecord := range walRecordsGroup {
@@ -514,6 +531,13 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				tableStorageVal, err := database.getTableStorage(tableName)
 				if err != nil {
 					return nil, err
+				}
+
+				if !clearedTables[tableName] {
+					if err := tableStorageVal.Reset(); err != nil {
+						return nil, err
+					}
+					clearedTables[tableName] = true
 				}
 
 				id := getPrimaryKey(record)

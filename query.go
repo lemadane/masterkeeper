@@ -177,7 +177,7 @@ func (query *Query[T]) List() ([]T, error) {
 		}
 	}
 
-	if !useIndexLookup && query.committedTable != nil {
+	if !useIndexLookup && query.committedTable != nil && (query.staging == nil || !query.staging.Cleared) {
 		for _, condition := range query.conditions {
 			if equalityCondition, found := condition.(*conditionImpl); found && strings.Contains(equalityCondition.desc, "==") {
 				fieldName := equalityCondition.FieldName()

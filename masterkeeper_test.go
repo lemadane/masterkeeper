@@ -1,6 +1,7 @@
 package masterkeeper_test
 
 import (
+	"errors"
 	"fmt"
 	keeper "github.com/lemadane/masterkeeper"
 	"math"
@@ -1011,6 +1012,203 @@ func TestDeadlockE2E(testingT *testing.T) {
 		testingT.Errorf("expected ErrClosed, got %v", err)
 	}
 }
+
+func TestRecoveryNoDuplication(testingT *testing.T) {
+	tempDir, err := os.MkdirTemp("", "keeper-test-duplication-*")
+	if err != nil {
+		testingT.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(UserRecord{})
+
+	// 1. Open database and insert record
+	database, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to open database: %v", err)
+	}
+
+	table, err := keeper.GetTable[UserID, UserRecord](database, "users")
+	if err != nil {
+		database.Close()
+		testingT.Fatalf("failed to get table: %v", err)
+	}
+
+	err = table.Insert(nil, UserRecord{ID: 1, Name: "Alice"})
+	if err != nil {
+		database.Close()
+		testingT.Fatalf("failed to insert record: %v", err)
+	}
+
+	database.Close()
+
+	// 2. Measure table storage file size
+	dbFilePath := filepath.Join(tempDir, "users.db")
+	fileInfo1, err := os.Stat(dbFilePath)
+	if err != nil {
+		testingT.Fatalf("failed to stat users.db: %v", err)
+	}
+	initialSize := fileInfo1.Size()
+	if initialSize == 0 {
+		testingT.Fatalf("expected users.db size to be greater than 0")
+	}
+
+	// 3. Reopen database (triggers recovery replay) and close immediately
+	database2, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to reopen database: %v", err)
+	}
+	database2.Close()
+
+	// 4. Measure table storage file size again
+	fileInfo2, err := os.Stat(dbFilePath)
+	if err != nil {
+		testingT.Fatalf("failed to stat users.db after reopen: %v", err)
+	}
+	reopenedSize := fileInfo2.Size()
+
+	if reopenedSize != initialSize {
+		testingT.Errorf("record duplication detected: file size grew from %d bytes to %d bytes on database reopen", initialSize, reopenedSize)
+	}
+
+	// 5. Reopen and verify data is still correct
+	database3, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to reopen database for read: %v", err)
+	}
+	defer database3.Close()
+
+	table3, err := keeper.GetTable[UserID, UserRecord](database3, "users")
+	if err != nil {
+		testingT.Fatalf("failed to get table on third open: %v", err)
+	}
+
+	record, found, err := table3.FindByID(nil, UserID(1))
+	if err != nil {
+		testingT.Fatalf("failed to find record after recovery: %v", err)
+	}
+	if !found {
+		testingT.Fatalf("record not found after recovery")
+	}
+	if record.Name != "Alice" {
+		testingT.Errorf("expected record name Alice, got %s", record.Name)
+	}
+}
+
+func TestIncompatibleTypesPrevention(testingT *testing.T) {
+	tempDir, err := os.MkdirTemp("", "keeper-test-incompatible-*")
+	if err != nil {
+		testingT.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(UserRecord{})
+
+	database, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	// 1. First registration should succeed
+	_, err = keeper.GetTable[UserID, UserRecord](database, "users")
+	if err != nil {
+		testingT.Fatalf("failed to register table first time: %v", err)
+	}
+
+	// 2. Registering with incompatible ID type should fail
+	_, err = keeper.GetTable[string, UserRecord](database, "users")
+	if err == nil {
+		testingT.Errorf("expected error when registering with incompatible ID type, got nil")
+	} else if !errors.Is(err, keeper.ErrIncompatibleTypes) {
+		testingT.Errorf("expected errors.Is(err, ErrIncompatibleTypes), got: %v", err)
+	}
+
+	// 3. Registering with incompatible Entity type should fail
+	type DifferentRecord struct {
+		ID   UserID `keeper:"id"`
+		Age  int
+	}
+	_, err = keeper.GetTable[UserID, DifferentRecord](database, "users")
+	if err == nil {
+		testingT.Errorf("expected error when registering with incompatible Entity type, got nil")
+	} else if !errors.Is(err, keeper.ErrIncompatibleTypes) {
+		testingT.Errorf("expected errors.Is(err, ErrIncompatibleTypes), got: %v", err)
+	}
+
+	// 4. Registering with correct types again should succeed
+	_, err = keeper.GetTable[UserID, UserRecord](database, "users")
+	if err != nil {
+		testingT.Errorf("failed to register table again with correct types: %v", err)
+	}
+}
+
+func TestQueryAfterClearE2E(testingT *testing.T) {
+	tempDir, err := os.MkdirTemp("", "keeper-test-query-clear-*")
+	if err != nil {
+		testingT.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	options := keeper.DefaultOptions()
+	options.RegisterTypes(Customer{})
+
+	database, err := keeper.Open(tempDir, options)
+	if err != nil {
+		testingT.Fatalf("failed to open database: %v", err)
+	}
+	defer database.Close()
+
+	customerTable, err := keeper.GetTable[string, Customer](database, "customers")
+	if err != nil {
+		testingT.Fatalf("failed to get table: %v", err)
+	}
+
+	// 1. Insert initial record
+	err = customerTable.Insert(nil, Customer{ID: "cust_1", Name: "Alice", Email: "alice@example.com", Age: 30})
+	if err != nil {
+		testingT.Fatalf("failed to insert initial: %v", err)
+	}
+
+	// 2. Start transaction, clear table, insert new record, and query it
+	err = database.Transaction(func(transaction *keeper.Transaction) error {
+		err := customerTable.Clear(transaction)
+		if err != nil {
+			return err
+		}
+
+		err = customerTable.Insert(transaction, Customer{ID: "cust_new", Name: "NewAlice", Email: "new@example.com", Age: 25})
+		if err != nil {
+			return err
+		}
+
+		results, err := customerTable.Query(transaction).
+			Where(keeper.Eq("Email", "new@example.com")).
+			List()
+		if err != nil {
+			return err
+		}
+
+		if len(results) != 1 {
+			testingT.Errorf("expected 1 record from query after clear, got: %d", len(results))
+			return nil
+		}
+
+		if results[0].ID != "cust_new" {
+			testingT.Errorf("expected customer ID cust_new, got: %s", results[0].ID)
+		}
+
+		return nil
+	})
+	if err != nil {
+		testingT.Fatalf("transaction failed: %v", err)
+	}
+}
+
+
+
 
 
 

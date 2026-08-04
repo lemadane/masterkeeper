@@ -21,6 +21,7 @@ func (duplicateIndexError *ErrDuplicateIndex) Error() string {
 }
 
 var ErrInvalidTableName = errors.New("invalid table name")
+var ErrIncompatibleTypes = errors.New("incompatible table schema types")
 
 func isValidTableName(tableName string) bool {
 	if len(tableName) == 0 {

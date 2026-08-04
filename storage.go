@@ -198,3 +198,20 @@ func (tableStorage *TableStorage) Compact(activePointers map[any]RecordPointer) 
 
 	return nil
 }
+
+func (tableStorage *TableStorage) Reset() error {
+	tableStorage.mu.Lock()
+	defer tableStorage.mu.Unlock()
+	if tableStorage.file == nil {
+		return ErrClosed
+	}
+
+	if err := tableStorage.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := tableStorage.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	tableStorage.currentSize = 0
+	return tableStorage.file.Sync()
+}
