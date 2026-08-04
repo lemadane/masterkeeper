@@ -62,6 +62,7 @@ func (indexState *IndexState) Add(indexValue any, primaryKey any) {
 	if indexValue == nil {
 		return
 	}
+	indexValue = canonicalizeKey(indexValue)
 	if indexState.Metadata.Unique {
 		indexState.UniqueMap[indexValue] = primaryKey
 	} else {
@@ -88,6 +89,7 @@ func (indexState *IndexState) Remove(indexValue any, primaryKey any) {
 	if indexValue == nil {
 		return
 	}
+	indexValue = canonicalizeKey(indexValue)
 	if indexState.Metadata.Unique {
 		delete(indexState.UniqueMap, indexValue)
 	} else {
@@ -431,6 +433,42 @@ func getFieldValue(record any, fieldName string) any {
 	return fieldValue.Interface()
 }
 
+func asFloat(value any) (float64, bool) {
+	switch val := value.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	}
+	return 0, false
+}
+
+func asInteger(value any) (int64, bool) {
+	switch val := value.(type) {
+	case int:
+		return int64(val), true
+	case int64:
+		return val, true
+	case int32:
+		return int64(val), true
+	case int16:
+		return int64(val), true
+	case int8:
+		return int64(val), true
+	}
+	return 0, false
+}
+
+func asFloatOrInteger(value any) (float64, bool) {
+	if fVal, ok := asFloat(value); ok {
+		return fVal, true
+	}
+	if iVal, ok := asInteger(value); ok {
+		return float64(iVal), true
+	}
+	return 0, false
+}
+
 func compareValues(leftValue, rightValue any) int {
 	if leftValue == nil && rightValue == nil {
 		return 0
@@ -442,45 +480,33 @@ func compareValues(leftValue, rightValue any) int {
 		return 1
 	}
 
+	// 1. Try integer comparison first (to preserve full precision)
+	if leftInt, isLeftInt := asInteger(leftValue); isLeftInt {
+		if rightInt, isRightInt := asInteger(rightValue); isRightInt {
+			if leftInt < rightInt {
+				return -1
+			} else if leftInt > rightInt {
+				return 1
+			}
+			return 0
+		}
+	}
+
+	// 2. Try numeric comparison (floats, or mixed float/integer)
+	if leftNum, isLeftNum := asFloatOrInteger(leftValue); isLeftNum {
+		if rightNum, isRightNum := asFloatOrInteger(rightValue); isRightNum {
+			if leftNum < rightNum {
+				return -1
+			} else if leftNum > rightNum {
+				return 1
+			}
+			return 0
+		}
+	}
+
 	switch left := leftValue.(type) {
 	case string:
 		if right, found := rightValue.(string); found {
-			if left < right {
-				return -1
-			} else if left > right {
-				return 1
-			}
-			return 0
-		}
-	case int32:
-		if right, found := rightValue.(int32); found {
-			if left < right {
-				return -1
-			} else if left > right {
-				return 1
-			}
-			return 0
-		}
-	case int64:
-		if right, found := rightValue.(int64); found {
-			if left < right {
-				return -1
-			} else if left > right {
-				return 1
-			}
-			return 0
-		}
-	case int:
-		if right, found := rightValue.(int); found {
-			if left < right {
-				return -1
-			} else if left > right {
-				return 1
-			}
-			return 0
-		}
-	case float64:
-		if right, found := rightValue.(float64); found {
 			if left < right {
 				return -1
 			} else if left > right {
@@ -519,4 +545,28 @@ func compareValues(leftValue, rightValue any) int {
 
 func valuesEqual(leftValue, rightValue any) bool {
 	return compareValues(leftValue, rightValue) == 0
+}
+
+func canonicalizeKey(value any) any {
+	if value == nil {
+		return nil
+	}
+	reflectValue := reflect.ValueOf(value)
+	for reflectValue.Kind() == reflect.Ptr || reflectValue.Kind() == reflect.Interface {
+		if reflectValue.IsNil() {
+			return nil
+		}
+		reflectValue = reflectValue.Elem()
+	}
+	if reflectValue.Type().Comparable() {
+		return reflectValue.Interface()
+	}
+
+	// Handle []byte specifically
+	if reflectValue.Kind() == reflect.Slice && reflectValue.Type().Elem().Kind() == reflect.Uint8 {
+		return string(reflectValue.Bytes())
+	}
+
+	// For other non-comparable types, fallback to their string representation
+	return fmt.Sprintf("%v", reflectValue.Interface())
 }

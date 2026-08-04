@@ -388,7 +388,7 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 					if error == nil && oldRecord != nil {
 						indexValue := getFieldValue(oldRecord, indexMetadata.FieldName)
 						if indexValue != nil {
-							txRemovedUnique[indexValue] = struct{}{}
+							txRemovedUnique[canonicalizeKey(indexValue)] = struct{}{}
 						}
 					}
 				}
@@ -397,7 +397,7 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 					if error == nil && oldRecord != nil {
 						indexValue := getFieldValue(oldRecord, indexMetadata.FieldName)
 						if indexValue != nil {
-							txRemovedUnique[indexValue] = struct{}{}
+							txRemovedUnique[canonicalizeKey(indexValue)] = struct{}{}
 						}
 					}
 				}
@@ -407,6 +407,7 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 				if indexValue == nil {
 					return nil
 				}
+				indexValue = canonicalizeKey(indexValue)
 
 				if existingKey, exists := txAddedUnique[indexValue]; exists {
 					if existingKey != key {

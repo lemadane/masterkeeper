@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,6 +49,7 @@ type Database struct {
 	durability           DurabilityMode
 	walManager           *WalManager
 	writeLock            sync.Mutex
+	activeGoroutineID    atomic.Int64
 	committedState       atomic.Pointer[DatabaseState]
 	tableMetadataMap     sync.Map // tableName -> TableMetadata
 	tableStorageMap      sync.Map // tableName -> *TableStorage
@@ -149,6 +152,7 @@ func (database *Database) getTableStorage(tableName string) (*TableStorage, erro
 }
 
 func (database *Database) releaseWriterLock() {
+	database.activeGoroutineID.Store(0)
 	database.writeLock.Unlock()
 }
 
@@ -157,6 +161,10 @@ func (database *Database) publish(nextState *DatabaseState) {
 }
 
 func (database *Database) registerTableMetadata(tableName string, idType reflect.Type, entityType reflect.Type) error {
+	if error := validateSchema(idType, entityType); error != nil {
+		return error
+	}
+
 	if !isValidTableName(tableName) {
 		return InvalidTableNameError
 	}
@@ -339,11 +347,17 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 }
 
 func (database *Database) Transaction(callback func(transaction *Transaction) error) error {
+	currentGoroutineID := getGoroutineID()
+	if database.activeGoroutineID.Load() == currentGoroutineID {
+		return NestedTransactionNotSupportedError
+	}
+
 	database.writeLock.Lock()
 	if database.closed.Load() {
 		database.writeLock.Unlock()
 		return DatabaseClosedError
 	}
+	database.activeGoroutineID.Store(currentGoroutineID)
 	transactionID := rand.Int63()
 	transaction := NewTransaction(transactionID, database, database.getCommittedState())
 
@@ -905,7 +919,15 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 		return nil, error
 	}
 
-	databaseState := NewDatabaseState(snapshotGen)
+	type tableSnapshotData struct {
+		tableName   string
+		idType      reflect.Type
+		entityType  reflect.Type
+		indexMetas  []IndexMetadata
+		recordBytes [][]byte
+	}
+
+	var tableSnapshots []tableSnapshotData
 
 	for tableIndex := 0; tableIndex < int(tableCount); tableIndex++ {
 		tableName, error := readString(teeReader)
@@ -961,20 +983,12 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 			})
 		}
 
-		tableState := NewTableState(tableName, idType, entityType, indexMetas)
-
 		var recordCount int32
 		if error := binary.Read(teeReader, binary.BigEndian, &recordCount); error != nil {
 			return nil, error
 		}
 
-		storagePath := filepath.Join(directory, tableName+".db")
-		_ = os.Remove(storagePath)
-		tableStorageValue, error := database.getTableStorage(tableName)
-		if error != nil {
-			return nil, error
-		}
-
+		var records [][]byte
 		for recordIndex := 0; recordIndex < int(recordCount); recordIndex++ {
 			var recordLength int32
 			if error := binary.Read(teeReader, binary.BigEndian, &recordLength); error != nil {
@@ -984,21 +998,16 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 			if _, error := io.ReadFull(teeReader, recordBytes); error != nil {
 				return nil, error
 			}
-
-			newRecordValue := reflect.New(entityType)
-			if error := Unmarshal(recordBytes, newRecordValue.Interface()); error != nil {
-				return nil, error
-			}
-			record := newRecordValue.Elem().Interface()
-
-			recordPointer, error := tableStorageValue.AppendRecord(recordBytes)
-			if error != nil {
-				return nil, error
-			}
-			tableState.Insert(record, recordPointer)
+			records = append(records, recordBytes)
 		}
 
-		databaseState.Tables[tableName] = tableState
+		tableSnapshots = append(tableSnapshots, tableSnapshotData{
+			tableName:   tableName,
+			idType:      idType,
+			entityType:  entityType,
+			indexMetas:  indexMetas,
+			recordBytes: records,
+		})
 	}
 
 	var buffer [1024]byte
@@ -1023,6 +1032,35 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 	computedChecksum := int64(hash.Sum32())
 	if computedChecksum != fileChecksum {
 		return nil, fmt.Errorf("corrupt snapshot: checksum failure")
+	}
+
+	// ONLY AFTER checksum and metadata validation succeeds, we remove/overwrite table storage files
+	databaseState := NewDatabaseState(snapshotGen)
+	for _, snap := range tableSnapshots {
+		storagePath := filepath.Join(directory, snap.tableName+".db")
+		_ = os.Remove(storagePath)
+		tableStorageValue, error := database.getTableStorage(snap.tableName)
+		if error != nil {
+			return nil, error
+		}
+
+		tableState := NewTableState(snap.tableName, snap.idType, snap.entityType, snap.indexMetas)
+
+		for _, recordBytes := range snap.recordBytes {
+			newRecordValue := reflect.New(snap.entityType)
+			if error := Unmarshal(recordBytes, newRecordValue.Interface()); error != nil {
+				return nil, error
+			}
+			record := newRecordValue.Elem().Interface()
+
+			recordPointer, error := tableStorageValue.AppendRecord(recordBytes)
+			if error != nil {
+				return nil, error
+			}
+			tableState.Insert(record, recordPointer)
+		}
+
+		databaseState.Tables[snap.tableName] = tableState
 	}
 
 	return databaseState, nil
@@ -1186,4 +1224,78 @@ func copyFile(src, dst string) error {
 		return error
 	}
 	return out.Sync()
+}
+
+func getGoroutineID() int64 {
+	var buffer [64]byte
+	bytesWritten := runtime.Stack(buffer[:], false)
+	stackSlice := buffer[:bytesWritten]
+	prefix := []byte("goroutine ")
+	if !bytes.HasPrefix(stackSlice, prefix) {
+		return 0
+	}
+	stackSlice = stackSlice[len(prefix):]
+	endIndex := bytes.IndexByte(stackSlice, ' ')
+	if endIndex == -1 {
+		return 0
+	}
+	id, error := strconv.ParseInt(string(stackSlice[:endIndex]), 10, 64)
+	if error != nil {
+		return 0
+	}
+	return id
+}
+
+func validateSchema(idType reflect.Type, entityType reflect.Type) error {
+	for entityType.Kind() == reflect.Ptr {
+		entityType = entityType.Elem()
+	}
+	if entityType.Kind() != reflect.Struct {
+		return fmt.Errorf("%w: entity type must be a struct, got %s", IncompatibleTypesError, entityType.Kind().String())
+	}
+
+	// Scan primary key ID fields in entity
+	idFieldCount := 0
+	var actualIdType reflect.Type
+	for index := 0; index < entityType.NumField(); index++ {
+		structField := entityType.Field(index)
+		if structField.PkgPath != "" {
+			continue // unexported
+		}
+		tag := structField.Tag.Get("keeper")
+		parts := strings.Split(tag, ",")
+		isID := false
+		if len(parts) > 0 && strings.TrimSpace(parts[0]) == "id" {
+			isID = true
+		}
+		for _, part := range parts {
+			if strings.TrimSpace(part) == "id" {
+				isID = true
+			}
+		}
+		if isID || strings.ToLower(structField.Name) == "id" {
+			idFieldCount++
+			actualIdType = structField.Type
+		}
+	}
+
+	if idFieldCount == 0 {
+		return fmt.Errorf("%w: entity must have exactly one ID field (tagged with `keeper:\"id\"` or named 'id')", IncompatibleTypesError)
+	}
+	if idFieldCount > 1 {
+		return fmt.Errorf("%w: entity has multiple ID fields, exactly one is required", IncompatibleTypesError)
+	}
+
+	// Check if generic ID type matches entity's ID field type
+	for idType.Kind() == reflect.Ptr {
+		idType = idType.Elem()
+	}
+	for actualIdType.Kind() == reflect.Ptr {
+		actualIdType = actualIdType.Elem()
+	}
+	if idType != actualIdType {
+		return fmt.Errorf("%w: generic ID type %s does not match entity ID field type %s", IncompatibleTypesError, idType.String(), actualIdType.String())
+	}
+
+	return nil
 }

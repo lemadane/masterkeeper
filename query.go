@@ -190,12 +190,13 @@ func (query *Query[T]) List() ([]T, error) {
 				for _, indexState := range query.committedTable.Indexes {
 					if strings.EqualFold(indexState.Metadata.FieldName, fieldName) {
 						useIndexLookup = true
+						canonicalValue := canonicalizeKey(targetValue)
 						if indexState.Metadata.Unique {
-							if primaryKey, foundKey := indexState.UniqueMap[targetValue]; foundKey {
+							if primaryKey, foundKey := indexState.UniqueMap[canonicalValue]; foundKey {
 								targetIDs = append(targetIDs, primaryKey)
 							}
 						} else {
-							if primaryKeys, foundKeys := indexState.SecondaryMap[targetValue]; foundKeys {
+							if primaryKeys, foundKeys := indexState.SecondaryMap[canonicalValue]; foundKeys {
 								targetIDs = append(targetIDs, primaryKeys...)
 							}
 						}

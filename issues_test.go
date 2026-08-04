@@ -1,0 +1,363 @@
+package masterkeeper
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+type IssueCustomer struct {
+	ID   string `keeper:"id"`
+	Name string `keeper:"index"`
+	Age  int
+}
+
+type Float32Record struct {
+	ID    string  `keeper:"id"`
+	Score float32 `keeper:"index"`
+	Age8  int8    `keeper:"index"`
+	Age16 int16   `keeper:"index"`
+}
+
+type BytesRecord struct {
+	ID   string `keeper:"id"`
+	Hash []byte `keeper:"unique"`
+}
+
+type MultiIDRecord struct {
+	ID1 string `keeper:"id"`
+	ID2 string `keeper:"id"`
+}
+
+type NoIDRecord struct {
+	Name string
+}
+
+func TestWALChecksumCorruption(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-corrupt-wal-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+
+	customerTable, testError := GetTable[string, IssueCustomer](database, "customers")
+	if testError != nil {
+		database.Close()
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	_ = customerTable.Insert(nil, IssueCustomer{ID: "c1", Name: "Alice", Age: 30})
+	database.Close()
+
+	// Corrupt final WAL record checksum
+	walPath := filepath.Join(tempDirectory, "wal.log")
+	walFile, err := os.OpenFile(walPath, os.O_RDWR, 0644)
+	if err != nil {
+		test.Fatalf("failed to open WAL: %v", err)
+	}
+	fileInfo, _ := walFile.Stat()
+	if fileInfo.Size() >= 4 {
+		_, _ = walFile.WriteAt([]byte{0xde, 0xad, 0xbe, 0xef}, fileInfo.Size()-4)
+	}
+	walFile.Close()
+
+	// Reopen database should return a checksum corruption error!
+	_, testError = Open(tempDirectory, options)
+	if testError == nil {
+		test.Errorf("expected WAL checksum corruption error, got nil")
+	} else if !strings.Contains(testError.Error(), "checksum mismatch") {
+		test.Errorf("expected checksum mismatch error, got: %v", testError)
+	}
+}
+
+func TestWALCommitWriteFailure(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-commit-fail-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+
+	customerTable, testError := GetTable[string, IssueCustomer](database, "customers")
+	if testError != nil {
+		database.Close()
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	// Force write failure by closing the table storage's file
+	tableStorageVal, err := database.getTableStorage("customers")
+	if err != nil {
+		database.Close()
+		test.Fatalf("failed to get table storage: %v", err)
+	}
+	tableStorageVal.mu.Lock()
+	if tableStorageVal.file != nil {
+		tableStorageVal.file.Close()
+	}
+	tableStorageVal.mu.Unlock()
+
+	// Attempt to commit a transaction (should fail)
+	testError = database.Transaction(func(tx *Transaction) error {
+		return customerTable.Insert(tx, IssueCustomer{ID: "c1", Name: "Alice", Age: 30})
+	})
+	if testError == nil {
+		test.Errorf("expected commit write failure, got nil")
+	}
+
+	database.Close()
+
+	// Reopen database and verify the record is NOT present!
+	database2, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to reopen database: %v", testError)
+	}
+	defer database2.Close()
+
+	customerTable2, _ := GetTable[string, IssueCustomer](database2, "customers")
+	_, found, _ := customerTable2.FindByID(nil, "c1")
+	if found {
+		test.Errorf("failed transaction record should not have been committed or recovered")
+	}
+}
+
+func TestCorruptSnapshotValidation(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-corrupt-snap-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+
+	customerTable, testError := GetTable[string, IssueCustomer](database, "customers")
+	if testError != nil {
+		database.Close()
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	_ = customerTable.Insert(nil, IssueCustomer{ID: "c1", Name: "Alice", Age: 30})
+	if testError := database.Compact(); testError != nil {
+		database.Close()
+		test.Fatalf("failed to compact: %v", testError)
+	}
+	database.Close()
+
+	// Corrupt snapshot file checksum at the end of the file
+	files, _ := os.ReadDir(tempDirectory)
+	var snapPath string
+	for _, entry := range files {
+		if strings.HasPrefix(entry.Name(), "snapshot.") {
+			snapPath = filepath.Join(tempDirectory, entry.Name())
+			break
+		}
+	}
+	if snapPath != "" {
+		snapFile, err := os.OpenFile(snapPath, os.O_RDWR, 0644)
+		if err == nil {
+			fileInfo, _ := snapFile.Stat()
+			if fileInfo.Size() >= 8 {
+				_, _ = snapFile.WriteAt([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, fileInfo.Size()-8)
+			}
+			snapFile.Close()
+		}
+	} else {
+		test.Fatalf("snapshot file not found in %s", tempDirectory)
+	}
+
+	// Reopen database should fail during snapshot read, but table storage file must NOT be deleted or modified!
+	_, testError = Open(tempDirectory, options)
+	if testError == nil {
+		test.Errorf("expected snapshot validation error, got nil")
+	}
+
+	// Verify that customers.db still exists on disk
+	if _, err := os.Stat(filepath.Join(tempDirectory, "customers.db")); os.IsNotExist(err) {
+		test.Errorf("customers.db was deleted or modified upon snapshot validation failure")
+	}
+}
+
+func TestGetTableSchemaValidation(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-schema-val-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{}, Float32Record{}, BytesRecord{}, MultiIDRecord{}, NoIDRecord{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	// 1. Generic ID mismatch validation
+	_, testError = GetTable[int, IssueCustomer](database, "customers")
+	if testError == nil || !errors.Is(testError, IncompatibleTypesError) {
+		test.Errorf("expected IncompatibleTypesError for ID mismatch, got: %v", testError)
+	}
+
+	// 2. T is not a struct validation
+	_, testError = GetTable[string, string](database, "strings")
+	if testError == nil || !errors.Is(testError, IncompatibleTypesError) {
+		test.Errorf("expected IncompatibleTypesError for non-struct type, got: %v", testError)
+	}
+
+	// 3. Entity has no ID field validation
+	_, testError = GetTable[string, NoIDRecord](database, "no_id")
+	if testError == nil || !errors.Is(testError, IncompatibleTypesError) {
+		test.Errorf("expected IncompatibleTypesError for entity with no ID, got: %v", testError)
+	}
+
+	// 4. Entity has multiple ID fields validation
+	_, testError = GetTable[string, MultiIDRecord](database, "multi_id")
+	if testError == nil || !errors.Is(testError, IncompatibleTypesError) {
+		test.Errorf("expected IncompatibleTypesError for entity with multiple IDs, got: %v", testError)
+	}
+}
+
+func TestFloat32QueryComparison(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-float32-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(Float32Record{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	table, testError := GetTable[string, Float32Record](database, "floats")
+	if testError != nil {
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	_ = table.Insert(nil, Float32Record{ID: "r1", Score: 2.0, Age8: 2, Age16: 2})
+	_ = table.Insert(nil, Float32Record{ID: "r2", Score: 10.0, Age8: 10, Age16: 10})
+
+	// Float32 comparison check
+	results, testError := table.Query(nil).
+		Where(GreaterThan("Score", float32(5.0))).
+		List()
+	if testError != nil {
+		test.Fatalf("query failed: %v", testError)
+	}
+	if len(results) != 1 || results[0].ID != "r2" {
+		test.Errorf("expected 1 record with ID r2 for float32 query, got: %+v", results)
+	}
+
+	// Int8 comparison check
+	results, testError = table.Query(nil).
+		Where(GreaterThan("Age8", int8(5))).
+		List()
+	if testError != nil {
+		test.Fatalf("query failed: %v", testError)
+	}
+	if len(results) != 1 || results[0].ID != "r2" {
+		test.Errorf("expected 1 record with ID r2 for int8 query, got: %+v", results)
+	}
+
+	// Int16 comparison check
+	results, testError = table.Query(nil).
+		Where(GreaterThan("Age16", int16(5))).
+		List()
+	if testError != nil {
+		test.Fatalf("query failed: %v", testError)
+	}
+	if len(results) != 1 || results[0].ID != "r2" {
+		test.Errorf("expected 1 record with ID r2 for int16 query, got: %+v", results)
+	}
+}
+
+func TestSliceByteUniqueIndex(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-bytes-unique-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(BytesRecord{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	table, testError := GetTable[string, BytesRecord](database, "documents")
+	if testError != nil {
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	// Insert distinct byte slices (should succeed)
+	if testError := table.Insert(nil, BytesRecord{ID: "d1", Hash: []byte("hello")}); testError != nil {
+		test.Fatalf("failed to insert document: %v", testError)
+	}
+	if testError := table.Insert(nil, BytesRecord{ID: "d2", Hash: []byte("world")}); testError != nil {
+		test.Fatalf("failed to insert document: %v", testError)
+	}
+
+	// Insert duplicate byte slice (should fail unique constraint validation)
+	testError = table.Insert(nil, BytesRecord{ID: "d3", Hash: []byte("hello")})
+	if testError == nil {
+		test.Errorf("expected duplicate unique index conflict for byte slice, got nil")
+	}
+}
+
+func TestNestedTransactionRejection(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-nested-tx-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	// Nested transaction attempt should return NestedTransactionNotSupportedError immediately
+	testError = database.Transaction(func(outer *Transaction) error {
+		return database.Transaction(func(inner *Transaction) error {
+			return nil
+		})
+	})
+
+	if !errors.Is(testError, NestedTransactionNotSupportedError) {
+		test.Errorf("expected NestedTransactionNotSupportedError, got: %v", testError)
+	}
+}

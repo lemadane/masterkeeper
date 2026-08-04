@@ -84,7 +84,7 @@ user, found, err := table.FindByID(nil, "usr_1")
 
 // Query records with criteria using index lookups
 users, err := table.Query(nil).
-    Where(masterkeeper.Eq("Name", "Alice")).
+    Where(masterkeeper.Equal("Name", "Alice")).
     List()
 ```
 

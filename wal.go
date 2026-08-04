@@ -297,12 +297,6 @@ func (walManager *WalManager) ReadAllRecords() ([]WalRecord, error) {
 		}
 
 		if hash.Sum32() != uint32(checksumValue) {
-			// If not at the end of the file, this is middle corruption
-			currentOffset, _ := walManager.walFile.Seek(0, io.SeekCurrent)
-			fileSize, _ := walManager.walFile.Seek(0, io.SeekEnd)
-			if currentOffset >= fileSize {
-				break
-			}
 			return nil, fmt.Errorf("corrupt WAL: checksum mismatch")
 		}
 
@@ -363,47 +357,38 @@ func (walManager *WalManager) processTasks(tasks []*WriteTask) {
 	walManager.mu.Lock()
 	defer walManager.mu.Unlock()
 
-	var buffer bytes.Buffer
+	var mutationBuffer bytes.Buffer
 	var lastError error
 	modifiedTables := make(map[string]*TableStorage)
 
-	// Step 1: Write all WAL records to buffer
+	// Step 1: Write all transaction mutations (BEGIN + WalRecords) to WAL buffer
 	for _, writeTask := range tasks {
-		// BEGIN
 		beginRecord := WalRecord{
 			Type:          OpBeginTransaction,
 			TransactionID: writeTask.TxID,
 			Generation:    writeTask.Generation,
 		}
-		if error := walManager.writeRecordToBuffer(&buffer, beginRecord); error != nil {
+		if error := walManager.writeRecordToBuffer(&mutationBuffer, beginRecord); error != nil {
 			lastError = error
 			break
 		}
 
-		// Mutations
 		for _, record := range writeTask.WalRecords {
-			if error := walManager.writeRecordToBuffer(&buffer, record); error != nil {
+			if error := walManager.writeRecordToBuffer(&mutationBuffer, record); error != nil {
 				lastError = error
 				break
 			}
 		}
-
-		// COMMIT
-		commitRecord := WalRecord{
-			Type:          OpCommitTransaction,
-			TransactionID: writeTask.TxID,
-			Generation:    writeTask.Generation,
-		}
-		if error := walManager.writeRecordToBuffer(&buffer, commitRecord); error != nil {
-			lastError = error
-			break
-		}
 	}
 
-	// Step 2: Write WAL buffer to file
-	if lastError == nil && buffer.Len() > 0 {
-		if _, error := walManager.walFile.Write(buffer.Bytes()); error != nil {
+	// Step 2: Write mutations WAL buffer to file and sync WAL
+	if lastError == nil && mutationBuffer.Len() > 0 {
+		if _, error := walManager.walFile.Write(mutationBuffer.Bytes()); error != nil {
 			lastError = error
+		} else if walManager.durability == DurabilitySync || walManager.durability == DurabilityBatched {
+			if error := walManager.walFile.Sync(); error != nil {
+				lastError = error
+			}
 		}
 	}
 
@@ -435,18 +420,14 @@ func (walManager *WalManager) processTasks(tasks []*WriteTask) {
 		}
 
 		if taskError != nil {
-			lastError = taskError
 			taskResults[index] = WriteResult{Error: taskError}
 		} else {
 			taskResults[index] = WriteResult{Pointers: pointersMap}
 		}
 	}
 
-	// Step 4: Sync files if SYNC or BATCHED
+	// Step 4: Sync table files
 	if lastError == nil && (walManager.durability == DurabilitySync || walManager.durability == DurabilityBatched) {
-		if error := walManager.walFile.Sync(); error != nil {
-			lastError = error
-		}
 		for _, tableStorageValue := range modifiedTables {
 			tableStorageValue.mu.Lock()
 			if tableStorageValue.file != nil {
@@ -458,7 +439,40 @@ func (walManager *WalManager) processTasks(tasks []*WriteTask) {
 		}
 	}
 
-	// Step 5: Complete task done channels
+	// Step 5: Write COMMIT or ROLLBACK markers to WAL buffer
+	var commitBuffer bytes.Buffer
+	for index, writeTask := range tasks {
+		if lastError == nil && taskResults[index].Error == nil {
+			commitRecord := WalRecord{
+				Type:          OpCommitTransaction,
+				TransactionID: writeTask.TxID,
+				Generation:    writeTask.Generation,
+			}
+			if error := walManager.writeRecordToBuffer(&commitBuffer, commitRecord); error != nil {
+				lastError = error
+			}
+		} else {
+			rollbackRecord := WalRecord{
+				Type:          OpRollbackTransaction,
+				TransactionID: writeTask.TxID,
+				Generation:    writeTask.Generation,
+			}
+			_ = walManager.writeRecordToBuffer(&commitBuffer, rollbackRecord)
+		}
+	}
+
+	// Step 6: Write commit markers to WAL file and sync WAL
+	if commitBuffer.Len() > 0 {
+		if _, error := walManager.walFile.Write(commitBuffer.Bytes()); error != nil {
+			lastError = error
+		} else if walManager.durability == DurabilitySync || walManager.durability == DurabilityBatched {
+			if error := walManager.walFile.Sync(); error != nil {
+				lastError = error
+			}
+		}
+	}
+
+	// Step 7: Complete task done channels
 	for index, writeTask := range tasks {
 		if lastError != nil {
 			writeTask.Done <- WriteResult{Error: lastError}
