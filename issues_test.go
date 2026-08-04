@@ -605,14 +605,15 @@ func TestLegacySnapshotMagicCompatibility(test *testing.T) {
 	}
 }
 
-func TestCrossGoroutineNestedTransactionContextCancellation(test *testing.T) {
-	tempDirectory, testError := os.MkdirTemp("", "keeper-test-context-cancel-*")
+func TestLegacyTransactionTimeout(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-legacy-timeout-*")
 	if testError != nil {
 		test.Fatalf("failed to create temp directory: %v", testError)
 	}
 	defer os.RemoveAll(tempDirectory)
 
 	options := DefaultOptions()
+	options.TransactionWaitTimeout = 50 * time.Millisecond
 	options.RegisterTypes(IssueCustomer{})
 
 	database, testError := Open(tempDirectory, options)
@@ -621,20 +622,21 @@ func TestCrossGoroutineNestedTransactionContextCancellation(test *testing.T) {
 	}
 	defer database.Close()
 
-	testError = database.TransactionContext(context.Background(), func(ctx context.Context, outer *Transaction) error {
+	testError = database.Transaction(func(outer *Transaction) error {
 		resultChan := make(chan error)
 		go func() {
-			cancelCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-			defer cancel()
-			resultChan <- database.TransactionContext(cancelCtx, func(ctx context.Context, inner *Transaction) error {
+			resultChan <- database.Transaction(func(inner *Transaction) error {
 				return nil
 			})
 		}()
 		return <-resultChan
 	})
 
-	if !errors.Is(testError, context.DeadlineExceeded) && !errors.Is(testError, context.Canceled) {
-		test.Errorf("expected context cancellation or deadline error, got: %v", testError)
+	if !errors.Is(testError, TransactionWaitTimeoutError) {
+		test.Errorf("expected errors.Is(err, TransactionWaitTimeoutError) to be true, got %v", testError)
+	}
+	if !errors.Is(testError, context.DeadlineExceeded) {
+		test.Errorf("expected errors.Is(err, context.DeadlineExceeded) to be true, got %v", testError)
 	}
 }
 

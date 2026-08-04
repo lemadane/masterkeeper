@@ -1,6 +1,27 @@
 package masterkeeper
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
+
+type transactionWaitTimeoutError struct {
+	err error
+}
+
+func (e *transactionWaitTimeoutError) Error() string {
+	return "timed out waiting for transaction writer lock"
+}
+
+func (e *transactionWaitTimeoutError) Unwrap() error {
+	return e.err
+}
+
+func (e *transactionWaitTimeoutError) Is(target error) bool {
+	return target == TransactionWaitTimeoutError || target == context.DeadlineExceeded
+}
+
+var TransactionWaitTimeoutError error = &transactionWaitTimeoutError{err: context.DeadlineExceeded}
 
 var (
 	NotActiveTransactionError          = errors.New("transaction is not active")

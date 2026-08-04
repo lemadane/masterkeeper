@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -18,18 +19,21 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const SnapshotMagic int32 = 0x524d524d
 
 type Options struct {
-	Durability DurabilityMode
-	Types      []any
+	Durability             DurabilityMode
+	Types                  []any
+	TransactionWaitTimeout time.Duration
 }
 
 func DefaultOptions() Options {
 	return Options{
-		Durability: DurabilitySync,
+		Durability:             DurabilitySync,
+		TransactionWaitTimeout: 30 * time.Second,
 	}
 }
 
@@ -46,18 +50,19 @@ type TableMetadata struct {
 }
 
 type Database struct {
-	directory            string
-	durability           DurabilityMode
-	walManager           *WalManager
-	writeLock            chan struct{}
-	activeGoroutineID    atomic.Int64
-	committedState       atomic.Pointer[DatabaseState]
-	tableMetadataMap     sync.Map // tableName -> TableMetadata
-	tableStorageMap      sync.Map // tableName -> *TableStorage
-	closed               atomic.Bool
-	databaseID           int64
-	lastFlushError       error
-	lastFlushErrorMutex  sync.RWMutex
+	directory              string
+	durability             DurabilityMode
+	walManager             *WalManager
+	writeLock              chan struct{}
+	activeGoroutineID      atomic.Int64
+	committedState         atomic.Pointer[DatabaseState]
+	tableMetadataMap       sync.Map // tableName -> TableMetadata
+	tableStorageMap        sync.Map // tableName -> *TableStorage
+	closed                 atomic.Bool
+	databaseID             int64
+	lastFlushError         error
+	lastFlushErrorMutex    sync.RWMutex
+	transactionWaitTimeout time.Duration
 }
 
 func Open(directory string, options Options) (*Database, error) {
@@ -66,11 +71,17 @@ func Open(directory string, options Options) (*Database, error) {
 		RegisterType(typeValue)
 	}
 
+	timeout := options.TransactionWaitTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+
 	database := &Database{
-		directory:  directory,
-		durability: options.Durability,
-		databaseID: rand.Int63() & 0x7fffffffffffffff,
-		writeLock:  make(chan struct{}, 1),
+		directory:              directory,
+		durability:             options.Durability,
+		databaseID:             rand.Int63() & 0x7fffffffffffffff,
+		writeLock:              make(chan struct{}, 1),
+		transactionWaitTimeout: timeout,
 	}
 	database.writeLock <- struct{}{}
 
@@ -372,9 +383,49 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 type txContextKey struct{}
 
 func (database *Database) Transaction(callback func(transaction *Transaction) error) error {
-	return database.TransactionContext(context.Background(), func(ctx context.Context, tx *Transaction) error {
-		return callback(tx)
-	})
+	currentGoroutineID := getGoroutineID()
+	if database.activeGoroutineID.Load() == currentGoroutineID {
+		return NestedTransactionNotSupportedError
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), database.transactionWaitTimeout)
+	err := database.lock(ctx)
+	cancel()
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return TransactionWaitTimeoutError
+		}
+		return err
+	}
+
+	if database.closed.Load() {
+		database.unlock()
+		return DatabaseClosedError
+	}
+
+	database.activeGoroutineID.Store(currentGoroutineID)
+	transactionID := rand.Int63()
+	transaction := NewTransaction(transactionID, database, database.getCommittedState())
+
+	defer func() {
+		if transaction.IsActive() {
+			_ = transaction.Rollback()
+		}
+	}()
+
+	err = callback(transaction)
+	if err != nil {
+		if transaction.IsActive() {
+			_ = transaction.Rollback()
+		}
+		return err
+	}
+
+	if transaction.IsActive() {
+		return transaction.Commit()
+	}
+
+	return nil
 }
 
 func (database *Database) TransactionContext(ctx context.Context, callback func(ctx context.Context, transaction *Transaction) error) error {

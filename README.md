@@ -193,6 +193,25 @@ While both engines use WAL, they do so at different abstraction levels:
 
 ---
 
+## Transactions Guidelines
+
+To maintain safe concurrency and prevent transaction writer lock starvation or deadlocks, observe the following rules:
+
+- **Use `Transaction()` for simple, single-goroutine transactions**: The legacy `Transaction()` method is context-free and uses a configurable timeout (default 30 seconds) to acquire the writer lock, returning `TransactionWaitTimeoutError` on timeout.
+- **Use `TransactionContext()` for concurrent, cancellable, or timed-out transactions**: Prefer `TransactionContext()` if you are using Go concurrency, cancellations, or deadlines.
+- **Always propagate the transaction context (`txCtx`)**: When launching child goroutines or starting related transactional units of work from within a transaction callback, pass the propagated `txCtx` context:
+  ```go
+  db.TransactionContext(ctx, func(txCtx context.Context, outer *Transaction) error {
+      return db.TransactionContext(txCtx, func(nestedCtx context.Context, inner *Transaction) error {
+          return nil
+      })
+  })
+  ```
+  This will immediately return `NestedTransactionNotSupportedError` instead of deadlocking.
+- **Never start a legacy nested transaction on a spawned goroutine**: Never start a child transaction via `Transaction()` and block waiting for it inside an active transaction, as this will lead to a transaction writer lock timeout.
+
+---
+
 ## Stress Test Results
 
 MasterKeeper has been rigorously stress-tested for single-table and multi-table operations under both synchronous and asynchronous durabilities, concurrently saving and querying **1,000,000 records** per test.
