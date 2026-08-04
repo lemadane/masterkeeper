@@ -266,6 +266,9 @@ func (walManager *WalManager) ReadAllRecords() ([]WalRecord, error) {
 		if error := binary.Read(walManager.walFile, binary.BigEndian, &typeByteValue); error != nil {
 			break
 		}
+		if typeByteValue > 11 {
+			return nil, fmt.Errorf("corrupt WAL: unknown operation type 0x%X", typeByteValue)
+		}
 		if error := binary.Read(walManager.walFile, binary.BigEndian, &transactionID); error != nil {
 			break
 		}

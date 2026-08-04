@@ -365,6 +365,13 @@ func (database *Database) TransactionContext(ctx context.Context, callback func(
 		return NestedTransactionNotSupportedError
 	}
 
+	activeID := database.activeGoroutineID.Load()
+	if activeID != 0 && activeID != currentGoroutineID {
+		if isGoroutineBlocked(activeID) {
+			return NestedTransactionNotSupportedError
+		}
+	}
+
 	database.writeLock.Lock()
 	if database.closed.Load() {
 		database.writeLock.Unlock()
@@ -749,6 +756,8 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 					}
 					tableState.IndexMetadataList = newIndexMetadataList
 				}
+			default:
+				return nil, fmt.Errorf("corrupt WAL: unknown operation type 0x%X", walRecord.Type)
 			}
 		}
 	}
@@ -1313,6 +1322,12 @@ func getGoroutineID() int64 {
 }
 
 func validateSchema(idType reflect.Type, entityType reflect.Type) error {
+	if entityType == nil {
+		return fmt.Errorf("%w: entity type must be a struct, got nil", IncompatibleTypesError)
+	}
+	if idType == nil {
+		return fmt.Errorf("%w: ID type must not be nil", IncompatibleTypesError)
+	}
 	if entityType.Kind() == reflect.Ptr {
 		return fmt.Errorf("%w: pointer entity types are not supported", IncompatibleTypesError)
 	}
@@ -1360,4 +1375,54 @@ func validateSchema(idType reflect.Type, entityType reflect.Type) error {
 	}
 
 	return nil
+}
+
+func isGoroutineBlocked(id int64) bool {
+	if id == 0 {
+		return false
+	}
+	var buf []byte
+	for size := 1024; size <= 1024*1024; size *= 2 {
+		buf = make([]byte, size)
+		n := runtime.Stack(buf, true)
+		if n < size {
+			buf = buf[:n]
+			break
+		}
+	}
+
+	lines := strings.Split(string(buf), "\n")
+	prefix := fmt.Sprintf("goroutine %d ", id)
+	found := false
+	var statusLine string
+	var goroutineStack []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			found = true
+			statusLine = line[len(prefix):]
+			continue
+		}
+		if found {
+			if line == "" {
+				break
+			}
+			goroutineStack = append(goroutineStack, line)
+		}
+	}
+
+	if !found {
+		return false
+	}
+
+	if !strings.Contains(statusLine, "chan receive") && !strings.Contains(statusLine, "select") && !strings.Contains(statusLine, "semacquire") {
+		return false
+	}
+
+	for _, stackLine := range goroutineStack {
+		if strings.Contains(stackLine, "(*Transaction).Commit") {
+			return false
+		}
+	}
+
+	return true
 }

@@ -603,3 +603,100 @@ func TestLegacySnapshotMagicCompatibility(test *testing.T) {
 		test.Errorf("failed to recover customer from legacy magic snapshot")
 	}
 }
+
+func TestLegacyCrossGoroutineNestedTransaction(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-legacy-cross-tx-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	testError = database.Transaction(func(outer *Transaction) error {
+		resultChan := make(chan error)
+		go func() {
+			resultChan <- database.Transaction(func(inner *Transaction) error {
+				return nil
+			})
+		}()
+		return <-resultChan
+	})
+
+	if !errors.Is(testError, NestedTransactionNotSupportedError) {
+		test.Errorf("expected NestedTransactionNotSupportedError for legacy cross-goroutine nested tx, got: %v", testError)
+	}
+}
+
+func TestUnknownWALOperationRejection(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-unknown-wal-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	customerTable, _ := GetTable[string, IssueCustomer](database, "customers")
+	_ = customerTable.Insert(nil, IssueCustomer{ID: "c1", Name: "Alice", Age: 30})
+	database.Close()
+
+	// Modify the operation type byte in the WAL to 0xFE (unknown type)
+	walPath := filepath.Join(tempDirectory, "wal.log")
+	walBytes, err := os.ReadFile(walPath)
+	if err == nil && len(walBytes) >= 30 {
+		walBytes[4] = 0xFE
+
+		// Recompute CRC32 checksum for the record
+		payloadLen := int32(binary.BigEndian.Uint32(walBytes[21:25]))
+		crcTable := crc32.MakeTable(crc32.Castagnoli)
+		hash := crc32.New(crcTable)
+		_, _ = hash.Write(walBytes[4:21]) // type, txID, gen
+		if payloadLen > 0 {
+			_, _ = hash.Write(walBytes[29 : 29+payloadLen])
+		}
+		checksum := hash.Sum32()
+		binary.BigEndian.PutUint32(walBytes[25:29], checksum)
+
+		_ = os.WriteFile(walPath, walBytes, 0644)
+	}
+
+	// Reopen database should return a corruption/unknown operation type error!
+	_, testError = Open(tempDirectory, options)
+	if testError == nil || !strings.Contains(testError.Error(), "unknown operation type") {
+		test.Errorf("expected unknown operation type error, got: %v", testError)
+	}
+}
+
+func TestNilInterfaceEntityValidation(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-nil-interface-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	_, testError = GetTable[string, any](database, "any_table")
+	if testError == nil || !errors.Is(testError, IncompatibleTypesError) {
+		test.Errorf("expected IncompatibleTypesError for interface entity type, got: %v", testError)
+	}
+}
