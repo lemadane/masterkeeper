@@ -105,6 +105,9 @@ func readString(reader io.Reader) (string, error) {
 	if error := binary.Read(reader, binary.BigEndian, &length); error != nil {
 		return "", error
 	}
+	if length < 0 || length > 1024*1024*16 {
+		return "", fmt.Errorf("corrupt data: invalid string length %d", length)
+	}
 	byteSlice := make([]byte, length)
 	if _, error := io.ReadFull(reader, byteSlice); error != nil {
 		return "", error

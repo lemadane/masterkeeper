@@ -114,6 +114,12 @@ func (tableStorage *TableStorage) ReadRecord(recordPointer RecordPointer) ([]byt
 	if tableStorage.file == nil {
 		return nil, DatabaseClosedError
 	}
+	if recordPointer.Size < 0 || recordPointer.Size > 1024*1024*64 {
+		return nil, fmt.Errorf("corrupt record pointer: invalid size %d", recordPointer.Size)
+	}
+	if recordPointer.Offset < 0 {
+		return nil, fmt.Errorf("corrupt record pointer: invalid negative offset %d", recordPointer.Offset)
+	}
 
 	buffer := make([]byte, recordPointer.Size)
 	_, error := tableStorage.file.ReadAt(buffer, recordPointer.Offset)

@@ -2,6 +2,7 @@ package masterkeeper
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -346,7 +347,19 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 	return true, nil
 }
 
+type txContextKey struct{}
+
 func (database *Database) Transaction(callback func(transaction *Transaction) error) error {
+	return database.TransactionContext(context.Background(), func(ctx context.Context, tx *Transaction) error {
+		return callback(tx)
+	})
+}
+
+func (database *Database) TransactionContext(ctx context.Context, callback func(ctx context.Context, transaction *Transaction) error) error {
+	if ctx.Value(txContextKey{}) != nil {
+		return NestedTransactionNotSupportedError
+	}
+
 	currentGoroutineID := getGoroutineID()
 	if database.activeGoroutineID.Load() == currentGoroutineID {
 		return NestedTransactionNotSupportedError
@@ -367,7 +380,8 @@ func (database *Database) Transaction(callback func(transaction *Transaction) er
 		}
 	}()
 
-	error := callback(transaction)
+	txCtx := context.WithValue(ctx, txContextKey{}, transaction)
+	error := callback(txCtx, transaction)
 	if error != nil {
 		// Rollback on callback error
 		if transaction.IsActive() {
@@ -906,7 +920,7 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 	if error := binary.Read(teeReader, binary.BigEndian, &magic); error != nil {
 		return nil, error
 	}
-	if magic != SnapshotMagic {
+	if magic != SnapshotMagic && magic != 0x524d534e {
 		return nil, fmt.Errorf("corrupt snapshot: magic mismatch")
 	}
 
@@ -917,6 +931,9 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 	var tableCount int32
 	if error := binary.Read(teeReader, binary.BigEndian, &tableCount); error != nil {
 		return nil, error
+	}
+	if tableCount < 0 || tableCount > 10000 {
+		return nil, fmt.Errorf("corrupt snapshot: invalid table count %d", tableCount)
 	}
 
 	type tableSnapshotData struct {
@@ -956,6 +973,9 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 		if error := binary.Read(teeReader, binary.BigEndian, &indexCount); error != nil {
 			return nil, error
 		}
+		if indexCount < 0 || indexCount > 1000 {
+			return nil, fmt.Errorf("corrupt snapshot: invalid index count %d", indexCount)
+		}
 
 		var indexMetas []IndexMetadata
 		for index := 0; index < int(indexCount); index++ {
@@ -987,6 +1007,9 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 		if error := binary.Read(teeReader, binary.BigEndian, &recordCount); error != nil {
 			return nil, error
 		}
+		if recordCount < 0 {
+			return nil, fmt.Errorf("corrupt snapshot: invalid record count %d", recordCount)
+		}
 
 		var records [][]byte
 		for recordIndex := 0; recordIndex < int(recordCount); recordIndex++ {
@@ -994,8 +1017,16 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 			if error := binary.Read(teeReader, binary.BigEndian, &recordLength); error != nil {
 				return nil, error
 			}
+			if recordLength < 0 || recordLength > 1024*1024*64 {
+				return nil, fmt.Errorf("corrupt snapshot: invalid record length %d", recordLength)
+			}
 			recordBytes := make([]byte, recordLength)
 			if _, error := io.ReadFull(teeReader, recordBytes); error != nil {
+				return nil, error
+			}
+			// Dry-run decode/validation
+			newRecordValue := reflect.New(entityType)
+			if error := Unmarshal(recordBytes, newRecordValue.Interface()); error != nil {
 				return nil, error
 			}
 			records = append(records, recordBytes)
@@ -1034,11 +1065,45 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 		return nil, fmt.Errorf("corrupt snapshot: checksum failure")
 	}
 
-	// ONLY AFTER checksum and metadata validation succeeds, we remove/overwrite table storage files
-	databaseState := NewDatabaseState(snapshotGen)
+	// ONLY AFTER checksum and metadata validation succeeds, we overwrite table storage files
+	var renamedTables []string
+	var databaseState *DatabaseState
+	var restoreSuccess bool
+
+	defer func() {
+		if !restoreSuccess {
+			// Rollback: Close and remove newly created files, restore .old files
+			for _, snap := range tableSnapshots {
+				database.tableStorageMap.Delete(snap.tableName)
+			}
+			for _, tableName := range renamedTables {
+				oldPath := filepath.Join(directory, tableName+".db.old")
+				newPath := filepath.Join(directory, tableName+".db")
+				_ = os.Remove(newPath)
+				_ = os.Rename(oldPath, newPath)
+			}
+		} else {
+			// Success: Clean up .old files
+			for _, tableName := range renamedTables {
+				oldPath := filepath.Join(directory, tableName+".db.old")
+				_ = os.Remove(oldPath)
+			}
+		}
+	}()
+
+	databaseState = NewDatabaseState(snapshotGen)
 	for _, snap := range tableSnapshots {
 		storagePath := filepath.Join(directory, snap.tableName+".db")
-		_ = os.Remove(storagePath)
+		oldPath := filepath.Join(directory, snap.tableName+".db.old")
+		if _, err := os.Stat(storagePath); err == nil {
+			_ = os.Remove(oldPath)
+			if err := os.Rename(storagePath, oldPath); err == nil {
+				renamedTables = append(renamedTables, snap.tableName)
+			}
+		}
+	}
+
+	for _, snap := range tableSnapshots {
 		tableStorageValue, error := database.getTableStorage(snap.tableName)
 		if error != nil {
 			return nil, error
@@ -1063,6 +1128,7 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 		databaseState.Tables[snap.tableName] = tableState
 	}
 
+	restoreSuccess = true
 	return databaseState, nil
 }
 
@@ -1247,11 +1313,14 @@ func getGoroutineID() int64 {
 }
 
 func validateSchema(idType reflect.Type, entityType reflect.Type) error {
-	for entityType.Kind() == reflect.Ptr {
-		entityType = entityType.Elem()
+	if entityType.Kind() == reflect.Ptr {
+		return fmt.Errorf("%w: pointer entity types are not supported", IncompatibleTypesError)
 	}
 	if entityType.Kind() != reflect.Struct {
 		return fmt.Errorf("%w: entity type must be a struct, got %s", IncompatibleTypesError, entityType.Kind().String())
+	}
+	if idType.Kind() == reflect.Ptr {
+		return fmt.Errorf("%w: pointer ID types are not supported", IncompatibleTypesError)
 	}
 
 	// Scan primary key ID fields in entity
@@ -1286,13 +1355,6 @@ func validateSchema(idType reflect.Type, entityType reflect.Type) error {
 		return fmt.Errorf("%w: entity has multiple ID fields, exactly one is required", IncompatibleTypesError)
 	}
 
-	// Check if generic ID type matches entity's ID field type
-	for idType.Kind() == reflect.Ptr {
-		idType = idType.Elem()
-	}
-	for actualIdType.Kind() == reflect.Ptr {
-		actualIdType = actualIdType.Elem()
-	}
 	if idType != actualIdType {
 		return fmt.Errorf("%w: generic ID type %s does not match entity ID field type %s", IncompatibleTypesError, idType.String(), actualIdType.String())
 	}

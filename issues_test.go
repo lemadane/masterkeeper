@@ -1,7 +1,10 @@
 package masterkeeper
 
 import (
+	"context"
+	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strings"
@@ -359,5 +362,244 @@ func TestNestedTransactionRejection(test *testing.T) {
 
 	if !errors.Is(testError, NestedTransactionNotSupportedError) {
 		test.Errorf("expected NestedTransactionNotSupportedError, got: %v", testError)
+	}
+}
+
+func TestSemanticInvalidSnapshotCorruptsDecodable(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-semantic-snap-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+
+	customerTable, testError := GetTable[string, IssueCustomer](database, "customers")
+	if testError != nil {
+		database.Close()
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	_ = customerTable.Insert(nil, IssueCustomer{ID: "c1", Name: "Alice", Age: 30})
+	if testError := database.Compact(); testError != nil {
+		database.Close()
+		test.Fatalf("failed to compact: %v", testError)
+	}
+	database.Close()
+
+	// Locate the snapshot file and corrupt a record's tag or make it fail unmarshal
+	files, _ := os.ReadDir(tempDirectory)
+	var snapPath string
+	for _, entry := range files {
+		if strings.HasPrefix(entry.Name(), "snapshot.") {
+			snapPath = filepath.Join(tempDirectory, entry.Name())
+			break
+		}
+	}
+	if snapPath != "" {
+		snapBytes, err := os.ReadFile(snapPath)
+		if err == nil {
+			// Corrupt last 12 bytes of the payload (just before the 8-byte checksum)
+			if len(snapBytes) > 30 {
+				for i := len(snapBytes) - 20; i < len(snapBytes) - 8; i++ {
+					snapBytes[i] = 0xff
+				}
+				
+				// Recompute CRC32
+				crcTable := crc32.MakeTable(crc32.Castagnoli)
+				hash := crc32.New(crcTable)
+				_, _ = hash.Write(snapBytes[:len(snapBytes)-8])
+				checksum := hash.Sum32()
+				
+				binary.BigEndian.PutUint64(snapBytes[len(snapBytes)-8:], uint64(checksum))
+				_ = os.WriteFile(snapPath, snapBytes, 0644)
+			}
+		}
+	}
+
+	// Reopen database should fail during snapshot unmarshal validation, leaving active db files intact
+	_, testError = Open(tempDirectory, options)
+	if testError == nil {
+		test.Errorf("expected snapshot record unmarshal validation to fail, got nil error")
+	}
+
+	// Verify that customers.db still exists on disk and is unchanged
+	if _, error := os.Stat(filepath.Join(tempDirectory, "customers.db")); os.IsNotExist(error) {
+		test.Errorf("customers.db was deleted or modified upon snapshot validation failure")
+	}
+}
+
+func TestNegativeWALAndSnapshotLengths(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-neg-wal-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	customerTable, _ := GetTable[string, IssueCustomer](database, "customers")
+	_ = customerTable.Insert(nil, IssueCustomer{ID: "c1", Name: "Alice", Age: 30})
+	database.Close()
+
+	// Modify WAL payload length to -1 (0xffffffff)
+	walPath := filepath.Join(tempDirectory, "wal.log")
+	walBytes, err := os.ReadFile(walPath)
+	if err == nil && len(walBytes) >= 20 {
+		binary.BigEndian.PutUint32(walBytes[len(walBytes)-12:len(walBytes)-8], 0xffffffff)
+		_ = os.WriteFile(walPath, walBytes, 0644)
+	}
+
+	// Reopen database should return a corruption error instead of panicking
+	_, testError = Open(tempDirectory, options)
+	if testError == nil || !strings.Contains(testError.Error(), "corrupt") {
+		test.Errorf("expected corrupt WAL error for negative length, got: %v", testError)
+	}
+}
+
+func TestPointerGenericIDValidation(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-ptr-id-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	_, testError = GetTable[*string, IssueCustomer](database, "customers")
+	if testError == nil || !errors.Is(testError, IncompatibleTypesError) {
+		test.Errorf("expected IncompatibleTypesError for pointer generic ID, got: %v", testError)
+	}
+}
+
+type PtrEntityRecord struct {
+	ID string `keeper:"id"`
+}
+
+func TestPointerEntityValidation(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-ptr-entity-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(PtrEntityRecord{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	_, testError = GetTable[string, *PtrEntityRecord](database, "ptr_entities")
+	if testError == nil || !errors.Is(testError, IncompatibleTypesError) {
+		test.Errorf("expected IncompatibleTypesError for pointer entity type, got: %v", testError)
+	}
+}
+
+func TestCrossGoroutineNestedTransactionRejection(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-cross-tx-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	testError = database.TransactionContext(context.Background(), func(ctx context.Context, outer *Transaction) error {
+		resultChan := make(chan error)
+		go func() {
+			resultChan <- database.TransactionContext(ctx, func(ctx context.Context, inner *Transaction) error {
+				return nil
+			})
+		}()
+		return <-resultChan
+	})
+
+	if !errors.Is(testError, NestedTransactionNotSupportedError) {
+		test.Errorf("expected NestedTransactionNotSupportedError for cross-goroutine nested tx, got: %v", testError)
+	}
+}
+
+func TestLegacySnapshotMagicCompatibility(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-legacy-snap-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	customerTable, _ := GetTable[string, IssueCustomer](database, "customers")
+	_ = customerTable.Insert(nil, IssueCustomer{ID: "c1", Name: "Alice", Age: 30})
+	_ = database.Compact()
+	database.Close()
+
+	// Locate snapshot and change magic to legacy SnapshotMagic (0x524d534e)
+	files, _ := os.ReadDir(tempDirectory)
+	var snapPath string
+	for _, entry := range files {
+		if strings.HasPrefix(entry.Name(), "snapshot.") {
+			snapPath = filepath.Join(tempDirectory, entry.Name())
+			break
+		}
+	}
+	if snapPath != "" {
+		snapBytes, err := os.ReadFile(snapPath)
+		if err == nil && len(snapBytes) >= 20 {
+			binary.BigEndian.PutUint32(snapBytes[0:4], 0x524d534e)
+
+			// Recompute CRC32
+			crcTable := crc32.MakeTable(crc32.Castagnoli)
+			hash := crc32.New(crcTable)
+			_, _ = hash.Write(snapBytes[:len(snapBytes)-8])
+			checksum := hash.Sum32()
+			binary.BigEndian.PutUint64(snapBytes[len(snapBytes)-8:], uint64(checksum))
+
+			_ = os.WriteFile(snapPath, snapBytes, 0644)
+		}
+	}
+
+	database2, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to reopen database with legacy magic snapshot: %v", testError)
+	}
+	defer database2.Close()
+
+	customerTable2, _ := GetTable[string, IssueCustomer](database2, "customers")
+	customer, found, _ := customerTable2.FindByID(nil, "c1")
+	if !found || customer.Name != "Alice" {
+		test.Errorf("failed to recover customer from legacy magic snapshot")
 	}
 }
