@@ -181,23 +181,72 @@ func (query *Query[T]) List() ([]T, error) {
 		}
 	}
 
+	generation := uint64(query.database.getCommittedState().Generation)
+	if query.staging != nil {
+		generation = uint64(query.database.currentGeneration())
+	}
+
 	if !useIndexLookup && query.committedTable != nil && (query.staging == nil || !query.staging.Cleared) {
 		for _, condition := range query.conditions {
 			if equalityCondition, found := condition.(*queryCondition); found && strings.Contains(equalityCondition.desc, "==") {
 				fieldName := equalityCondition.FieldName()
 				targetValue := equalityCondition.value
 
-				for _, indexState := range query.committedTable.Indexes {
-					if strings.EqualFold(indexState.Metadata.FieldName, fieldName) {
+				for _, indexMetadata := range query.committedTable.IndexMetadataList {
+					if strings.EqualFold(indexMetadata.FieldName, fieldName) {
 						useIndexLookup = true
 						canonicalValue := canonicalizeKey(targetValue)
-						if indexState.Metadata.Unique {
-							if primaryKey, foundKey := indexState.UniqueMap[canonicalValue]; foundKey {
+						canonicalValueBytes, serializeError := serializeKey(canonicalValue)
+						if serializeError != nil {
+							return nil, serializeError
+						}
+
+						namedIndex, loadError := query.database.getShadowNamedIndex(query.tableName, indexMetadata.IndexName)
+						if loadError != nil {
+							return nil, loadError
+						}
+
+						if indexMetadata.Unique {
+							// Unique index lookup: B+ Tree Find
+							recordPointer, foundKey, findError := namedIndex.Find(canonicalValueBytes, generation)
+							if findError != nil {
+								return nil, findError
+							}
+							if foundKey {
+								tableStorage, storageError := query.database.getTableStorage(query.tableName)
+								if storageError != nil {
+									return nil, storageError
+								}
+								bytesValue, readError := tableStorage.ReadRecord(recordPointer)
+								if readError != nil {
+									return nil, readError
+								}
+								newRecordValue := reflect.New(query.committedTable.EntityType)
+								if unmarshalError := Unmarshal(bytesValue, newRecordValue.Interface()); unmarshalError != nil {
+									return nil, unmarshalError
+								}
+								primaryKey := getPrimaryKey(newRecordValue.Elem().Interface())
 								targetIDs = append(targetIDs, primaryKey)
 							}
 						} else {
-							if primaryKeys, foundKeys := indexState.SecondaryMap[canonicalValue]; foundKeys {
-								targetIDs = append(targetIDs, primaryKeys...)
+							// Non-unique index lookup: B+ Tree range scan
+							startKey, serializeError := SerializeCompositeKey(canonicalValue, nil)
+							if serializeError != nil {
+								return nil, serializeError
+							}
+							rangeError := namedIndex.Range(startKey, nil, generation, func(compositeKeyBytes []byte, recordPointer RecordPointer) bool {
+								secondaryValue, primaryKey, deserializeError := DeserializeCompositeKey(compositeKeyBytes)
+								if deserializeError != nil {
+									return false
+								}
+								if compareValues(secondaryValue, canonicalValue) == 0 {
+									targetIDs = append(targetIDs, primaryKey)
+									return true
+								}
+								return false
+							})
+							if rangeError != nil {
+								return nil, rangeError
 							}
 						}
 						break
@@ -224,6 +273,11 @@ func (query *Query[T]) List() ([]T, error) {
 					return nil, error
 				}
 
+				namedIndex, loadError := query.database.getShadowIndex(query.tableName)
+				if loadError != nil {
+					return nil, loadError
+				}
+
 				for _, idValue := range targetIDs {
 					if query.staging != nil {
 						if _, deleted := query.staging.Deletes[idValue]; deleted {
@@ -237,7 +291,16 @@ func (query *Query[T]) List() ([]T, error) {
 						}
 					}
 
-					recordPointer, exists := query.committedTable.RecordPointers[idValue]
+					keyBytes, serializeError := serializeKey(idValue)
+					if serializeError != nil {
+						return nil, serializeError
+					}
+
+					recordPointer, exists, findError := namedIndex.Find(keyBytes, generation)
+					if findError != nil {
+						return nil, findError
+					}
+
 					if exists {
 						bytesValue, error := tableStorage.ReadRecord(recordPointer)
 						if error != nil {
@@ -303,29 +366,43 @@ func (query *Query[T]) List() ([]T, error) {
 					return nil, error
 				}
 
-				for primaryKey, recordPointer := range query.committedTable.RecordPointers {
+				namedIndex, loadError := query.database.getShadowIndex(query.tableName)
+				if loadError != nil {
+					return nil, loadError
+				}
+
+				rangeError := namedIndex.Range(nil, nil, generation, func(keyBytes []byte, recordPointer RecordPointer) bool {
+					primaryKey, deserializeError := deserializeKey(keyBytes)
+					if deserializeError != nil {
+						return false
+					}
+
 					if query.staging != nil {
 						if _, deleted := query.staging.Deletes[primaryKey]; deleted {
-							continue
+							return true
 						}
 						if _, updated := query.staging.Updates[primaryKey]; updated {
-							continue
+							return true
 						}
 						if _, inserted := query.staging.Inserts[primaryKey]; inserted {
-							continue
+							return true
 						}
 					}
 
 					bytesValue, error := tableStorage.ReadRecord(recordPointer)
 					if error != nil {
-						return nil, error
+						return false
 					}
 
 					newRecordValue := reflect.New(query.committedTable.EntityType)
 					if error := Unmarshal(bytesValue, newRecordValue.Interface()); error != nil {
-						return nil, error
+						return false
 					}
 					records = append(records, newRecordValue.Elem().Interface())
+					return true
+				})
+				if rangeError != nil {
+					return nil, rangeError
 				}
 			}
 
@@ -423,11 +500,11 @@ func (query *Query[T]) Explain() QueryPlan {
 		}
 
 		if query.committedTable != nil {
-			for _, indexState := range query.committedTable.Indexes {
-				if strings.EqualFold(indexState.Metadata.FieldName, condition.FieldName()) {
-					if indexState.Metadata.Unique {
+			for _, indexMetadata := range query.committedTable.IndexMetadataList {
+				if strings.EqualFold(indexMetadata.FieldName, condition.FieldName()) {
+					if indexMetadata.Unique {
 						strategy = "UNIQUE_INDEX_LOOKUP_WITH_TRANSACTION_OVERLAY"
-					} else if indexState.Metadata.Ordered {
+					} else if indexMetadata.Ordered {
 						strategy = "ORDERED_INDEX_LOOKUP_WITH_TRANSACTION_OVERLAY"
 					} else {
 						strategy = "SECONDARY_INDEX_LOOKUP_WITH_TRANSACTION_OVERLAY"

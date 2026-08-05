@@ -15,238 +15,43 @@ type IndexMetadata struct {
 	Ordered   bool
 }
 
-type IndexState struct {
-	Metadata     IndexMetadata
-	UniqueMap    map[any]any   // maps indexValue -> primaryKey
-	SecondaryMap map[any][]any // maps indexValue -> slice of primaryKeys
-	SortedKeys   []any         // kept sorted if Ordered is true
-}
-
-func NewIndexState(metadata IndexMetadata) *IndexState {
-	indexState := &IndexState{
-		Metadata: metadata,
-	}
-	if metadata.Unique {
-		indexState.UniqueMap = make(map[any]any)
-	} else {
-		indexState.SecondaryMap = make(map[any][]any)
-	}
-	return indexState
-}
-
-func (indexState *IndexState) Copy() *IndexState {
-	newIndexState := &IndexState{
-		Metadata: indexState.Metadata,
-	}
-	if indexState.Metadata.Unique {
-		newIndexState.UniqueMap = make(map[any]any)
-		for indexValue, primaryKey := range indexState.UniqueMap {
-			newIndexState.UniqueMap[indexValue] = primaryKey
-		}
-	} else {
-		newIndexState.SecondaryMap = make(map[any][]any)
-		for indexValue, primaryKeys := range indexState.SecondaryMap {
-			sliceCopy := make([]any, len(primaryKeys))
-			copy(sliceCopy, primaryKeys)
-			newIndexState.SecondaryMap[indexValue] = sliceCopy
-		}
-		if indexState.Metadata.Ordered {
-			newIndexState.SortedKeys = make([]any, len(indexState.SortedKeys))
-			copy(newIndexState.SortedKeys, indexState.SortedKeys)
-		}
-	}
-	return newIndexState
-}
-
-func (indexState *IndexState) Add(indexValue any, primaryKey any) {
-	if indexValue == nil {
-		return
-	}
-	indexValue = canonicalizeKey(indexValue)
-	if indexState.Metadata.Unique {
-		indexState.UniqueMap[indexValue] = primaryKey
-	} else {
-		primaryKeys := indexState.SecondaryMap[indexValue]
-		found := false
-		for _, key := range primaryKeys {
-			if key == primaryKey {
-				found = true
-				break
-			}
-		}
-		if !found {
-			indexState.SecondaryMap[indexValue] = append(primaryKeys, primaryKey)
-		}
-
-		if indexState.Metadata.Ordered {
-			// Maintain SortedKeys
-			indexState.insertSortedKey(indexValue)
-		}
-	}
-}
-
-func (indexState *IndexState) Remove(indexValue any, primaryKey any) {
-	if indexValue == nil {
-		return
-	}
-	indexValue = canonicalizeKey(indexValue)
-	if indexState.Metadata.Unique {
-		delete(indexState.UniqueMap, indexValue)
-	} else {
-		primaryKeys := indexState.SecondaryMap[indexValue]
-		for index, key := range primaryKeys {
-			if key == primaryKey {
-				indexState.SecondaryMap[indexValue] = append(primaryKeys[:index], primaryKeys[index+1:]...)
-				break
-			}
-		}
-		if len(indexState.SecondaryMap[indexValue]) == 0 {
-			delete(indexState.SecondaryMap, indexValue)
-			if indexState.Metadata.Ordered {
-				indexState.removeSortedKey(indexValue)
-			}
-		}
-	}
-}
-
-func (indexState *IndexState) insertSortedKey(key any) {
-	// Binary search to find position
-	low, high := 0, len(indexState.SortedKeys)-1
-	position := len(indexState.SortedKeys)
-	for low <= high {
-		mid := (low + high) / 2
-		comparison := compareValues(indexState.SortedKeys[mid], key)
-		if comparison == 0 {
-			return // already present
-		} else if comparison < 0 {
-			low = mid + 1
-		} else {
-			position = mid
-			high = mid - 1
-		}
-	}
-	if position == len(indexState.SortedKeys) {
-		indexState.SortedKeys = append(indexState.SortedKeys, key)
-	} else {
-		indexState.SortedKeys = append(indexState.SortedKeys, nil)
-		copy(indexState.SortedKeys[position+1:], indexState.SortedKeys[position:])
-		indexState.SortedKeys[position] = key
-	}
-}
-
-func (indexState *IndexState) removeSortedKey(key any) {
-	low, high := 0, len(indexState.SortedKeys)-1
-	for low <= high {
-		mid := (low + high) / 2
-		comparison := compareValues(indexState.SortedKeys[mid], key)
-		if comparison == 0 {
-			indexState.SortedKeys = append(indexState.SortedKeys[:mid], indexState.SortedKeys[mid+1:]...)
-			return
-		} else if comparison < 0 {
-			low = mid + 1
-		} else {
-			high = mid - 1
-		}
-	}
-}
-
-func (indexState *IndexState) Clear() {
-	if indexState.UniqueMap != nil {
-		indexState.UniqueMap = make(map[any]any)
-	}
-	if indexState.SecondaryMap != nil {
-		indexState.SecondaryMap = make(map[any][]any)
-	}
-	indexState.SortedKeys = nil
-}
-
 type TableState struct {
 	TableName         string
 	IdType            reflect.Type
 	EntityType        reflect.Type
-	RecordPointers    map[any]RecordPointer
-	Indexes           map[string]*IndexState
 	IndexMetadataList []IndexMetadata
 }
 
 func NewTableState(tableName string, idType reflect.Type, entityType reflect.Type, indexMetadataList []IndexMetadata) *TableState {
-	tableState := &TableState{
+	return &TableState{
 		TableName:         tableName,
 		IdType:            idType,
 		EntityType:        entityType,
-		RecordPointers:    make(map[any]RecordPointer),
-		Indexes:           make(map[string]*IndexState),
 		IndexMetadataList: indexMetadataList,
 	}
-	for _, metadata := range indexMetadataList {
-		tableState.Indexes[metadata.IndexName] = NewIndexState(metadata)
-	}
-	return tableState
 }
 
 func (tableState *TableState) Copy() *TableState {
-	newPointers := make(map[any]RecordPointer)
-	for key, pointer := range tableState.RecordPointers {
-		newPointers[key] = pointer
-	}
-	newIndexes := make(map[string]*IndexState)
-	for key, stateValue := range tableState.Indexes {
-		newIndexes[key] = stateValue.Copy()
-	}
+	indexMetadataCopy := make([]IndexMetadata, len(tableState.IndexMetadataList))
+	copy(indexMetadataCopy, tableState.IndexMetadataList)
 	return &TableState{
 		TableName:         tableState.TableName,
 		IdType:            tableState.IdType,
 		EntityType:        tableState.EntityType,
-		RecordPointers:    newPointers,
-		Indexes:           newIndexes,
-		IndexMetadataList: tableState.IndexMetadataList,
+		IndexMetadataList: indexMetadataCopy,
 	}
 }
 
 func (tableState *TableState) Insert(record any, recordPointer RecordPointer) {
-	id := getPrimaryKey(record)
-	tableState.RecordPointers[id] = recordPointer
-	for _, indexState := range tableState.Indexes {
-		indexValue := getFieldValue(record, indexState.Metadata.FieldName)
-		indexState.Add(indexValue, id)
-	}
 }
 
 func (tableState *TableState) Update(record any, oldRecord any, recordPointer RecordPointer) {
-	id := getPrimaryKey(record)
-	tableState.RecordPointers[id] = recordPointer
-	for _, indexState := range tableState.Indexes {
-		var oldValue any
-		if oldRecord != nil {
-			oldValue = getFieldValue(oldRecord, indexState.Metadata.FieldName)
-		}
-		newValue := getFieldValue(record, indexState.Metadata.FieldName)
-		if !valuesEqual(oldValue, newValue) {
-			if oldValue != nil {
-				indexState.Remove(oldValue, id)
-			}
-			indexState.Add(newValue, id)
-		}
-	}
 }
 
 func (tableState *TableState) Delete(key any, oldRecord any) {
-	delete(tableState.RecordPointers, key)
-	if oldRecord != nil {
-		for _, indexState := range tableState.Indexes {
-			indexValue := getFieldValue(oldRecord, indexState.Metadata.FieldName)
-			if indexValue != nil {
-				indexState.Remove(indexValue, key)
-			}
-		}
-	}
 }
 
 func (tableState *TableState) Clear() {
-	tableState.RecordPointers = make(map[any]RecordPointer)
-	for _, indexState := range tableState.Indexes {
-		indexState.Clear()
-	}
 }
 
 type DatabaseState struct {

@@ -498,3 +498,56 @@ func getFieldName(structField reflect.StructField) string {
 	fieldMetadata := parseFieldTag(structField)
 	return fieldMetadata.FieldName
 }
+
+func SerializeCompositeKey(secondaryKey any, primaryKey any) ([]byte, error) {
+	secondaryBytes, serializeError1 := serializeKey(secondaryKey)
+	if serializeError1 != nil {
+		return nil, serializeError1
+	}
+	primaryBytes, serializeError2 := serializeKey(primaryKey)
+	if serializeError2 != nil {
+		return nil, serializeError2
+	}
+
+	totalLength := 2 + len(secondaryBytes) + 2 + len(primaryBytes)
+	buffer := make([]byte, totalLength)
+
+	binary.BigEndian.PutUint16(buffer[0:2], uint16(len(secondaryBytes)))
+	copy(buffer[2:2+len(secondaryBytes)], secondaryBytes)
+
+	offset := 2 + len(secondaryBytes)
+	binary.BigEndian.PutUint16(buffer[offset:offset+2], uint16(len(primaryBytes)))
+	copy(buffer[offset+2:offset+2+len(primaryBytes)], primaryBytes)
+
+	return buffer, nil
+}
+
+func DeserializeCompositeKey(buffer []byte) (any, any, error) {
+	if len(buffer) < 4 {
+		return nil, nil, errors.New("composite key buffer too short")
+	}
+
+	secondaryLen := int(binary.BigEndian.Uint16(buffer[0:2]))
+	if len(buffer) < 2+secondaryLen+2 {
+		return nil, nil, errors.New("composite key buffer corrupt")
+	}
+	secondaryBytes := buffer[2 : 2+secondaryLen]
+
+	offset := 2 + secondaryLen
+	primaryLen := int(binary.BigEndian.Uint16(buffer[offset : offset+2]))
+	if len(buffer) < offset+2+primaryLen {
+		return nil, nil, errors.New("composite key buffer corrupt")
+	}
+	primaryBytes := buffer[offset+2 : offset+2+primaryLen]
+
+	secondaryVal, deserializeError1 := deserializeKey(secondaryBytes)
+	if deserializeError1 != nil {
+		return nil, nil, deserializeError1
+	}
+	primaryVal, deserializeError2 := deserializeKey(primaryBytes)
+	if deserializeError2 != nil {
+		return nil, nil, deserializeError2
+	}
+
+	return secondaryVal, primaryVal, nil
+}

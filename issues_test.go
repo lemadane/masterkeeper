@@ -885,11 +885,169 @@ func TestNilTransactionContextRejection(test *testing.T) {
 	}
 	defer database.Close()
 
-	testError = database.TransactionContext(nil, func(contextValue context.Context, transaction *Transaction) error {
+	var nilContext context.Context
+	testError = database.TransactionContext(nilContext, func(contextValue context.Context, transaction *Transaction) error {
 		return nil
 	})
 
 	if !errors.Is(testError, InvalidTransactionContextError) {
 		test.Errorf("expected InvalidTransactionContextError for nil context, got: %v", testError)
+	}
+}
+
+type RecoverRecord struct {
+	ID   string `keeper:"id"`
+	Code string `keeper:"unique"`
+	Val  int    `keeper:"index"`
+}
+
+func TestCrashRecoveryBPlusTree(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-crash-recovery-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(RecoverRecord{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+
+	table, testError := GetTable[string, RecoverRecord](database, "records")
+	if testError != nil {
+		database.Close()
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	// Insert records inside a transaction (appends to WAL and table files)
+	testError = database.Transaction(func(transaction *Transaction) error {
+		record1 := RecoverRecord{ID: "r1", Code: "CODE1", Val: 100}
+		if insertError := table.Insert(transaction, record1); insertError != nil {
+			return insertError
+		}
+		record2 := RecoverRecord{ID: "r2", Code: "CODE2", Val: 200}
+		if insertError := table.Insert(transaction, record2); insertError != nil {
+			return insertError
+		}
+		return nil
+	})
+	if testError != nil {
+		database.Close()
+		test.Fatalf("failed to insert records: %v", testError)
+	}
+
+	// Close database without compacting or snapshotting, leaving mutations in WAL
+	database.Close()
+
+	// Reopen the database - this triggers WAL replay into the B+ tree indexes
+	database2, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to reopen database: %v", testError)
+	}
+	defer database2.Close()
+
+	table2, testError := GetTable[string, RecoverRecord](database2, "records")
+	if testError != nil {
+		test.Fatalf("failed to get table on reopen: %v", testError)
+	}
+
+	// 1. Verify primary key lookup is replayed and queryable
+	record, found, findError1 := table2.FindByID(nil, "r1")
+	if findError1 != nil || !found || record.Code != "CODE1" || record.Val != 100 {
+		test.Errorf("failed to recover and query r1: found=%t, error=%v, record=%+v", found, findError1, record)
+	}
+
+	record2, found2, findError2 := table2.FindByID(nil, "r2")
+	if findError2 != nil || !found2 || record2.Code != "CODE2" || record2.Val != 200 {
+		test.Errorf("failed to recover and query r2: found=%t, error=%v, record=%+v", found2, findError2, record2)
+	}
+
+	// 2. Verify unique index lookup is replayed and queryable
+	results, uniqueQueryError := table2.Query(nil).Where(Equal("Code", "CODE2")).List()
+	if uniqueQueryError != nil || len(results) != 1 || results[0].ID != "r2" {
+		test.Errorf("failed to query recovered unique index: error=%v, results=%+v", uniqueQueryError, results)
+	}
+
+	// 3. Verify ordered secondary index is replayed and queryable
+	resultsOrdered, secondaryQueryError := table2.Query(nil).Where(Equal("Val", 100)).List()
+	if secondaryQueryError != nil || len(resultsOrdered) != 1 || resultsOrdered[0].ID != "r1" {
+		test.Errorf("failed to query recovered secondary index: error=%v, results=%+v", secondaryQueryError, resultsOrdered)
+	}
+}
+
+func TestLockFreeReadersConcurrency(test *testing.T) {
+	tempDirectory, testError := os.MkdirTemp("", "keeper-test-lock-free-*")
+	if testError != nil {
+		test.Fatalf("failed to create temp directory: %v", testError)
+	}
+	defer os.RemoveAll(tempDirectory)
+
+	options := DefaultOptions()
+	options.RegisterTypes(IssueCustomer{})
+
+	database, testError := Open(tempDirectory, options)
+	if testError != nil {
+		test.Fatalf("failed to open database: %v", testError)
+	}
+	defer database.Close()
+
+	table, testError := GetTable[string, IssueCustomer](database, "customers")
+	if testError != nil {
+		test.Fatalf("failed to get table: %v", testError)
+	}
+
+	// Write an initial committed record
+	testError = database.Transaction(func(transaction *Transaction) error {
+		return table.Insert(transaction, IssueCustomer{ID: "c0", Name: "Original", Age: 40})
+	})
+	if testError != nil {
+		test.Fatalf("failed to write initial record: %v", testError)
+	}
+
+	writeStartChan := make(chan struct{})
+	readerDoneChan := make(chan time.Duration, 1)
+
+	// Start a write transaction that sleeps to simulate a long writer hold
+	go func() {
+		_ = database.Transaction(func(transaction *Transaction) error {
+			// Notify reader that write transaction is active
+			close(writeStartChan)
+			
+			// Simulate long-running mutation hold
+			if insertError := table.Insert(transaction, IssueCustomer{ID: "c1", Name: "Alice", Age: 30}); insertError != nil {
+				return insertError
+			}
+			time.Sleep(100 * time.Millisecond)
+			if insertError := table.Insert(transaction, IssueCustomer{ID: "c2", Name: "Bob", Age: 25}); insertError != nil {
+				return insertError
+			}
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		})
+	}()
+
+	// Wait for the write transaction to start and acquire the database lock
+	<-writeStartChan
+	time.Sleep(10 * time.Millisecond) // Ensure it enters the transaction body
+
+	// Concurrently read the committed record "c0"
+	go func() {
+		startReadTime := time.Now()
+		customer, found, findError := table.FindByID(nil, "c0")
+		duration := time.Since(startReadTime)
+
+		if findError != nil || !found || customer.Name != "Original" {
+			test.Errorf("reader failed: found=%t, error=%v, customer=%+v", found, findError, customer)
+		}
+		readerDoneChan <- duration
+	}()
+
+	// Verify that the reader completed without blocking on the write transaction
+	readDuration := <-readerDoneChan
+	if readDuration >= 50*time.Millisecond {
+		test.Errorf("reader blocked on writer! Duration took: %v", readDuration)
 	}
 }

@@ -97,7 +97,8 @@ END`, tableName, quoteIdentifier(tableName, dialect), strings.Join(columnDefs, "
 				uniqueKeyword = "UNIQUE "
 			}
 
-			if dialect == DialectMSSQL {
+			switch dialect {
+			case DialectMSSQL:
 				indexSQL = fmt.Sprintf(`IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = '%s' AND object_id = OBJECT_ID('%s'))
 BEGIN
 	CREATE %sINDEX %s ON %s (%s);
@@ -109,14 +110,14 @@ END`,
 					quoteIdentifier(tableName, dialect),
 					quoteIdentifier(indexMetadata.FieldName, dialect),
 				)
-			} else if dialect == DialectPostgreSQL || dialect == DialectSQLite {
+			case DialectPostgreSQL, DialectSQLite:
 				indexSQL = fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)",
 					uniqueKeyword,
 					quoteIdentifier(indexName, dialect),
 					quoteIdentifier(tableName, dialect),
 					quoteIdentifier(indexMetadata.FieldName, dialect),
 				)
-			} else { // DialectMySQL
+			default: // DialectMySQL
 				indexSQL = fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
 					uniqueKeyword,
 					quoteIdentifier(indexName, dialect),
@@ -138,16 +139,24 @@ END`,
 
 		// 4. Retrieve and Insert Records
 		var records []any
-		for _, recordPointer := range tableState.RecordPointers {
+		namedIndex, loadError := database.getShadowIndex(tableName)
+		if loadError != nil {
+			return fmt.Errorf("failed to load shadow index for table %s: %w", tableName, loadError)
+		}
+		rangeError := namedIndex.Range(nil, nil, uint64(database.getCommittedState().Generation), func(keyBytes []byte, recordPointer RecordPointer) bool {
 			bytesValue, error := tableStorageValue.ReadRecord(recordPointer)
 			if error != nil {
-				return fmt.Errorf("failed to read record from table %s: %w", tableName, error)
+				return false
 			}
 			newRecordValue := reflect.New(tableState.EntityType)
 			if error := Unmarshal(bytesValue, newRecordValue.Interface()); error != nil {
-				return fmt.Errorf("failed to unmarshal record from table %s: %w", tableName, error)
+				return false
 			}
 			records = append(records, newRecordValue.Elem().Interface())
+			return true
+		})
+		if rangeError != nil {
+			return fmt.Errorf("failed to scan B+ tree for table %s: %w", tableName, rangeError)
 		}
 
 		if len(records) == 0 {
@@ -181,8 +190,8 @@ END`,
 		for _, record := range records {
 			reflectValue := reflect.ValueOf(record)
 			var args []any
-			for _, fName := range fieldNames {
-				fieldValue := reflectValue.FieldByName(fName)
+			for _, fieldName := range fieldNames {
+				fieldValue := reflectValue.FieldByName(fieldName)
 				boundValue, error := bindValue(fieldValue, dialect)
 				if error != nil {
 					sqlStatement.Close()

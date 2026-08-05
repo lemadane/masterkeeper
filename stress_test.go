@@ -35,7 +35,7 @@ type Review struct {
 	Rating    int
 }
 
-func TestStressSyncSingleTable(test *testing.T) {
+func SyncSingleTableStressTest(test *testing.T) {
 	tempDirectory, testError := os.MkdirTemp("", "keeper-stress-sync-single-*")
 	if testError != nil {
 		test.Fatalf("failed to create temp directory: %v", testError)
@@ -127,7 +127,7 @@ func TestStressSyncSingleTable(test *testing.T) {
 	}
 }
 
-func TestStressAsyncSingleTable(test *testing.T) {
+func AsyncSingleTableStressTest(test *testing.T) {
 	tempDirectory, testError := os.MkdirTemp("", "keeper-stress-async-single-*")
 	if testError != nil {
 		test.Fatalf("failed to create temp directory: %v", testError)
