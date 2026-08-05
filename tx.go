@@ -295,7 +295,12 @@ func (transaction *Transaction) Commit() error {
 
 			if tableChangeSet.Cleared {
 				tableState.Clear()
+				if shadowError := transaction.database.shadowClear(tableName); shadowError != nil {
+					return shadowError
+				}
 			}
+
+			modifiedShadow := false
 
 			// Apply deletes
 			for key := range tableChangeSet.Deletes {
@@ -304,6 +309,10 @@ func (transaction *Transaction) Commit() error {
 					return error
 				}
 				tableState.Delete(key, oldRecord)
+				if shadowError := transaction.database.shadowDeleteNoCommit(tableName, key, oldRecord, uint64(nextGenerationeration)); shadowError != nil {
+					return shadowError
+				}
+				modifiedShadow = true
 			}
 
 			// Apply inserts using generated pointers from background writer
@@ -315,6 +324,10 @@ func (transaction *Transaction) Commit() error {
 				ptr := generatedPointers[pointerIndex]
 				pointerIndex++
 				tableState.Insert(record, ptr)
+				if shadowError := transaction.database.shadowInsertNoCommit(tableName, record, ptr, uint64(nextGenerationeration)); shadowError != nil {
+					return shadowError
+				}
+				modifiedShadow = true
 			}
 
 			// Updates second
@@ -327,6 +340,19 @@ func (transaction *Transaction) Commit() error {
 					return error
 				}
 				tableState.Update(record, oldRecord, ptr)
+				if shadowError := transaction.database.shadowDeleteNoCommit(tableName, key, oldRecord, uint64(nextGenerationeration)); shadowError != nil {
+					return shadowError
+				}
+				if shadowError := transaction.database.shadowInsertNoCommit(tableName, record, ptr, uint64(nextGenerationeration)); shadowError != nil {
+					return shadowError
+				}
+				modifiedShadow = true
+			}
+
+			if modifiedShadow {
+				if shadowError := transaction.database.shadowCommit(tableName, uint64(nextGenerationeration)); shadowError != nil {
+					return shadowError
+				}
 			}
 		}
 
@@ -341,8 +367,16 @@ func (transaction *Transaction) readCommittedRecord(tableName string, key any) (
 	if tableState == nil {
 		return nil, nil
 	}
-	recordPointer, found := tableState.RecordPointers[key]
-	if !found {
+	namedIndex, loadError := transaction.database.getShadowIndex(tableName)
+	if loadError != nil {
+		return nil, loadError
+	}
+	keyBytes, serializeError := serializeKey(key)
+	if serializeError != nil {
+		return nil, serializeError
+	}
+	recordPointer, found, findError := namedIndex.Find(keyBytes, uint64(transaction.committedState.Generation))
+	if findError != nil || !found {
 		return nil, nil
 	}
 	tableStorage, error := transaction.database.getTableStorage(tableName)
@@ -373,12 +407,11 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 			continue
 		}
 
-		for _, committedIndex := range committedTable.Indexes {
-			if !committedIndex.Metadata.Unique {
+		for _, indexMetadata := range committedTable.IndexMetadataList {
+			if !indexMetadata.Unique {
 				continue
 			}
 
-			indexMetadata := committedIndex.Metadata
 			txAddedUnique := make(map[any]any)
 			txRemovedUnique := make(map[any]struct{})
 
@@ -423,13 +456,31 @@ func (transaction *Transaction) validateUniqueIndexes() error {
 
 				if !tableChangeSet.Cleared {
 					if _, removed := txRemovedUnique[indexValue]; !removed {
-						if existingKey, exists := committedIndex.UniqueMap[indexValue]; exists {
-							if existingKey != key {
-								return &DuplicateIndexError{
-									TableName: tableName,
-									IndexName: indexMetadata.IndexName,
-									Value:     indexValue,
-									Message:   fmt.Sprintf("duplicate value '%v' in unique index '%s' on table '%s'", indexValue, indexMetadata.IndexName, tableName),
+						namedIndex, loadError := transaction.database.getShadowNamedIndex(tableName, indexMetadata.IndexName)
+						if loadError == nil {
+							keyBytes, serializeError := serializeKey(indexValue)
+							if serializeError == nil {
+								recordPointer, exists, findError := namedIndex.Find(keyBytes, uint64(transaction.committedState.Generation))
+								if findError == nil && exists {
+									// Read record to find its primary key
+									tableStorage, storageError := transaction.database.getTableStorage(tableName)
+									if storageError == nil {
+										bytesValue, readError := tableStorage.ReadRecord(recordPointer)
+										if readError == nil {
+											newRecordValue := reflect.New(committedTable.EntityType)
+											if Unmarshal(bytesValue, newRecordValue.Interface()) == nil {
+												existingKey := getPrimaryKey(newRecordValue.Elem().Interface())
+												if existingKey != key {
+													return &DuplicateIndexError{
+														TableName: tableName,
+														IndexName: indexMetadata.IndexName,
+														Value:     indexValue,
+														Message:   fmt.Sprintf("duplicate value '%v' in unique index '%s' on table '%s'", indexValue, indexMetadata.IndexName, tableName),
+													}
+												}
+											}
+										}
+									}
 								}
 							}
 						}
@@ -476,8 +527,15 @@ func (transaction *Transaction) InsertDynamic(tableName string, record any) erro
 		if _, found := tableChangeSet.Deletes[primaryKeyValue]; !found {
 			tableState := transaction.committedState.Tables[tableName]
 			if tableState != nil {
-				if _, found := tableState.RecordPointers[primaryKeyValue]; found {
-					exists = true
+				namedIndex, loadError := transaction.database.getShadowIndex(tableName)
+				if loadError == nil {
+					keyBytes, serializeError := serializeKey(primaryKeyValue)
+					if serializeError == nil {
+						_, existsVal, findError := namedIndex.Find(keyBytes, uint64(transaction.committedState.Generation))
+						if findError == nil && existsVal {
+							exists = true
+						}
+					}
 				}
 			}
 		}
@@ -492,9 +550,9 @@ func (transaction *Transaction) InsertDynamic(tableName string, record any) erro
 	// Index additions
 	tableState := transaction.committedState.Tables[tableName]
 	if tableState != nil {
-		for _, indexState := range tableState.Indexes {
-			indexValue := getFieldValue(record, indexState.Metadata.FieldName)
-			transaction.changeSet.IndexChanges.Add(tableName, indexState.Metadata.IndexName, indexValue, primaryKeyValue)
+		for _, indexMetadata := range tableState.IndexMetadataList {
+			indexValue := getFieldValue(record, indexMetadata.FieldName)
+			transaction.changeSet.IndexChanges.Add(tableName, indexMetadata.IndexName, indexValue, primaryKeyValue)
 		}
 	}
 

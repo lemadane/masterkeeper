@@ -57,29 +57,51 @@ func (table *Table[ID, T]) FindByID(transaction *Transaction, idValue ID) (T, bo
 			return record.(T), true, nil
 		}
 
-		// Read committed
+		// Read committed from B+ Tree on disk
 		tableState := transaction.committedState.Tables[table.tableName]
 		if tableState != nil {
-			recordPointer, exists := tableState.RecordPointers[idValue]
+			namedIndex, loadError := table.database.getShadowIndex(table.tableName)
+			if loadError != nil {
+				return zero, false, loadError
+			}
+			keyBytes, serializeError := serializeKey(idValue)
+			if serializeError != nil {
+				return zero, false, serializeError
+			}
+			recordPointer, exists, findError := namedIndex.Find(keyBytes, uint64(transaction.committedState.Generation))
+			if findError != nil {
+				return zero, false, findError
+			}
 			if exists {
-				record, error := table.readFromStorage(recordPointer)
-				if error != nil {
-					return zero, false, error
+				record, readError := table.readFromStorage(recordPointer)
+				if readError != nil {
+					return zero, false, readError
 				}
 				return record, true, nil
 			}
 		}
 		return zero, false, nil
 	} else {
-		// Read directly from current committed state
+		// Read directly from current committed state B+ Tree on disk
 		committed := table.database.getCommittedState()
 		tableState := committed.Tables[table.tableName]
 		if tableState != nil {
-			recordPointer, exists := tableState.RecordPointers[idValue]
+			namedIndex, loadError := table.database.getShadowIndex(table.tableName)
+			if loadError != nil {
+				return zero, false, loadError
+			}
+			keyBytes, serializeError := serializeKey(idValue)
+			if serializeError != nil {
+				return zero, false, serializeError
+			}
+			recordPointer, exists, findError := namedIndex.Find(keyBytes, uint64(committed.Generation))
+			if findError != nil {
+				return zero, false, findError
+			}
 			if exists {
-				record, error := table.readFromStorage(recordPointer)
-				if error != nil {
-					return zero, false, error
+				record, readError := table.readFromStorage(recordPointer)
+				if readError != nil {
+					return zero, false, readError
 				}
 				return record, true, nil
 			}
@@ -129,7 +151,7 @@ func (table *Table[ID, T]) insert(transaction *Transaction, record T) error {
 
 	changeSet := transaction.changeSet.GetTableChanges(table.tableName)
 
-	// Check if exists in changeset or committed
+	// Check if exists in changeset or committed B+ tree
 	exists := false
 	if _, found := changeSet.Inserts[primaryKey]; found {
 		exists = true
@@ -139,8 +161,15 @@ func (table *Table[ID, T]) insert(transaction *Transaction, record T) error {
 		if _, deleted := changeSet.Deletes[primaryKey]; !deleted {
 			tableState := transaction.committedState.Tables[table.tableName]
 			if tableState != nil {
-				if _, found := tableState.RecordPointers[primaryKey]; found {
-					exists = true
+				namedIndex, loadError := table.database.getShadowIndex(table.tableName)
+				if loadError == nil {
+					keyBytes, serializeError := serializeKey(primaryKey)
+					if serializeError == nil {
+						_, existsVal, findError := namedIndex.Find(keyBytes, uint64(transaction.committedState.Generation))
+						if findError == nil && existsVal {
+							exists = true
+						}
+					}
 				}
 			}
 		}
@@ -155,9 +184,9 @@ func (table *Table[ID, T]) insert(transaction *Transaction, record T) error {
 	// Index additions
 	tableState := transaction.committedState.Tables[table.tableName]
 	if tableState != nil {
-		for _, indexState := range tableState.Indexes {
-			indexValue := getFieldValue(record, indexState.Metadata.FieldName)
-			transaction.changeSet.IndexChanges.Add(table.tableName, indexState.Metadata.IndexName, indexValue, primaryKey)
+		for _, indexMetadata := range tableState.IndexMetadataList {
+			indexValue := getFieldValue(record, indexMetadata.FieldName)
+			transaction.changeSet.IndexChanges.Add(table.tableName, indexMetadata.IndexName, indexValue, primaryKey)
 		}
 	}
 
@@ -199,14 +228,20 @@ func (table *Table[ID, T]) update(transaction *Transaction, record T) error {
 		if _, deleted := changeSet.Deletes[primaryKey]; !deleted {
 			tableState := transaction.committedState.Tables[table.tableName]
 			if tableState != nil {
-				recordPointer, exists := tableState.RecordPointers[primaryKey]
-				if exists {
-					rRecord, error := table.readFromStorage(recordPointer)
-					if error != nil {
-						return error
+				namedIndex, loadError := table.database.getShadowIndex(table.tableName)
+				if loadError == nil {
+					keyBytes, serializeError := serializeKey(primaryKey)
+					if serializeError == nil {
+						recordPointer, existsVal, findError := namedIndex.Find(keyBytes, uint64(transaction.committedState.Generation))
+						if findError == nil && existsVal {
+							rRecord, readError := table.readFromStorage(recordPointer)
+							if readError != nil {
+								return readError
+							}
+							oldRecord = rRecord
+							foundRecord = true
+						}
 					}
-					oldRecord = rRecord
-					foundRecord = true
 				}
 			}
 		}
@@ -225,14 +260,14 @@ func (table *Table[ID, T]) update(transaction *Transaction, record T) error {
 	// Update index changes
 	tableState := transaction.committedState.Tables[table.tableName]
 	if tableState != nil {
-		for _, indexState := range tableState.Indexes {
-			oldIndexValue := getFieldValue(oldRecord, indexState.Metadata.FieldName)
-			newIndexValue := getFieldValue(record, indexState.Metadata.FieldName)
+		for _, indexMetadata := range tableState.IndexMetadataList {
+			oldIndexValue := getFieldValue(oldRecord, indexMetadata.FieldName)
+			newIndexValue := getFieldValue(record, indexMetadata.FieldName)
 			if !valuesEqual(oldIndexValue, newIndexValue) {
 				if oldIndexValue != nil {
-					transaction.changeSet.IndexChanges.Remove(table.tableName, indexState.Metadata.IndexName, oldIndexValue, primaryKey)
+					transaction.changeSet.IndexChanges.Remove(table.tableName, indexMetadata.IndexName, oldIndexValue, primaryKey)
 				}
-				transaction.changeSet.IndexChanges.Add(table.tableName, indexState.Metadata.IndexName, newIndexValue, primaryKey)
+				transaction.changeSet.IndexChanges.Add(table.tableName, indexMetadata.IndexName, newIndexValue, primaryKey)
 			}
 		}
 	}
@@ -267,8 +302,15 @@ func (table *Table[ID, T]) upsert(transaction *Transaction, record T) error {
 		if _, deleted := changeSet.Deletes[primaryKey]; !deleted {
 			tableState := transaction.committedState.Tables[table.tableName]
 			if tableState != nil {
-				if _, found := tableState.RecordPointers[primaryKey]; found {
-					exists = true
+				namedIndex, loadError := table.database.getShadowIndex(table.tableName)
+				if loadError == nil {
+					keyBytes, serializeError := serializeKey(primaryKey)
+					if serializeError == nil {
+						_, existsVal, findError := namedIndex.Find(keyBytes, uint64(transaction.committedState.Generation))
+						if findError == nil && existsVal {
+							exists = true
+						}
+					}
 				}
 			}
 		}
@@ -313,14 +355,20 @@ func (table *Table[ID, T]) deleteByID(transaction *Transaction, idValue ID) (boo
 		if _, deleted := changeSet.Deletes[idValue]; !deleted {
 			tableState := transaction.committedState.Tables[table.tableName]
 			if tableState != nil {
-				recordPointer, exists := tableState.RecordPointers[idValue]
-				if exists {
-					rRecord, error := table.readFromStorage(recordPointer)
-					if error != nil {
-						return false, error
+				namedIndex, loadError := table.database.getShadowIndex(table.tableName)
+				if loadError == nil {
+					keyBytes, serializeError := serializeKey(idValue)
+					if serializeError == nil {
+						recordPointer, existsVal, findError := namedIndex.Find(keyBytes, uint64(transaction.committedState.Generation))
+						if findError == nil && existsVal {
+							rRecord, readError := table.readFromStorage(recordPointer)
+							if readError != nil {
+								return false, readError
+							}
+							oldRecord = rRecord
+							foundRecord = true
+						}
 					}
-					oldRecord = rRecord
-					foundRecord = true
 				}
 			}
 		}
@@ -340,10 +388,10 @@ func (table *Table[ID, T]) deleteByID(transaction *Transaction, idValue ID) (boo
 	// Index removals
 	tableState := transaction.committedState.Tables[table.tableName]
 	if tableState != nil {
-		for _, indexState := range tableState.Indexes {
-			indexValue := getFieldValue(oldRecord, indexState.Metadata.FieldName)
+		for _, indexMetadata := range tableState.IndexMetadataList {
+			indexValue := getFieldValue(oldRecord, indexMetadata.FieldName)
 			if indexValue != nil {
-				transaction.changeSet.IndexChanges.Remove(table.tableName, indexState.Metadata.IndexName, indexValue, idValue)
+				transaction.changeSet.IndexChanges.Remove(table.tableName, indexMetadata.IndexName, indexValue, idValue)
 			}
 		}
 	}

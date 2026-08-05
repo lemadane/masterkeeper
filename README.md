@@ -1,18 +1,33 @@
 # MasterKeeper
 
-**MasterKeeper** is a pure Go port of the [RecordMaster](https://github.com/lemadane/recordmaster) embedded transactional database engine. It is designed to be highly reusable in any Go project, offering ACID transactions, MVCC snapshot isolation, Write-Ahead Logging (WAL) with customizable durability modes, high-performance background writer concurrency, and hot backups.
+**MasterKeeper** is a pure, zero-dependency Go embedded transactional database engine. It is designed to be highly reusable in any Go project, offering ACID transactions, MVCC snapshot isolation, Write-Ahead Logging (WAL) with customizable durability modes, and consistent hot backups.
+
+---
+
+## Our Vision & How We Achieved It
+
+Our goal is to be a native-Go alternative to the SQLite engine—a NoSQL database engine that is very reliable, very fast, and fully embedded. MasterKeeper requires no complex SQL join engines; instead, relationships and joins are written cleanly and efficiently in Go.
+
+Here is how we achieved this vision:
+
+- **100% Native Go (Zero CGo Dependency)**: SQLite requires CGo when used in Go, which introduces compilation complexity and impedes cross-compilation. MasterKeeper is written entirely in Go. It compiles instantly and cross-compiles to any target platform out-of-the-box.
+- **On-Disk Source of Truth (Not a Cache)**: We migrated all lookups, validations, and index scans directly to on-disk, disk-backed copy-on-write B+ Tree structures (`.idx` files). MasterKeeper is a true embedded database engine, scaling to datasets far larger than RAM.
+- **Lock-Free Concurrent Readers (MVCC)**: We implemented a copy-on-write page swap model and a concurrent `catalogMutex` lookup system. This allows readers to execute searches and scans completely lock-free, running concurrently with active write transactions without blocking or contention.
+- **Crash Durability & WAL Recovery**: Outstanding transaction mutations are appended to a Write-Ahead Log (WAL) first. If a crash or power failure occurs, MasterKeeper automatically replays the WAL on startup directly into the B+ Tree files, ensuring complete ACID compliance.
+
+---
 
 ## Features
 
-- **ACID Transactions**: Supporting fully serialized write transactions and lock-free concurrent read queries.
-- **MVCC (Multi-Version Concurrency Control)**: Queries are run against an immutable snapshot of the committed database state, ensuring reads do not block writes and writes do not block reads.
-- **Background Writer Goroutine**: All transactions write to disk on a separate background goroutine. Multi-record commits and WAL updates are batched together to minimize disk I/O bottlenecks.
+- **ACID Transactions**: Fully serialized write transactions and lock-free concurrent read queries.
+- **MVCC (Multi-Version Concurrency Control)**: Queries are run against immutable on-disk snapshots of the committed state; reads do not block writes, and writes do not block reads.
+- **Background Writer Goroutine**: Batches transaction commits and WAL writes sequentially to minimize disk I/O bottlenecks.
 - **Custom Binary Serialization**: High-performance binary encoder and decoder utilizing Go struct tags (`keeper:"id"`, `keeper:"index"`, `keeper:"unique"`, `keeper:"ordered"`) with reflection caching for zero-overhead execution.
-- **Automatic Indexing**: Supports primary keys, secondary indices, unique index constraints, and ordered indices with binary search-based sorting.
+- **Automatic Indexing**: On-disk B+ Tree indices supporting primary keys, secondary indices, unique index constraints, and ordered indices with binary search-based sorting.
 - **Disk Space Compaction**: Reclaims space by purging deleted or updated records from active table storage files.
 - **JSON Import/Export**: Easily dump database tables to JSON format and restore them dynamically.
 - **Hot Backups**: Consistent point-in-time database backups performed while the database remains active and online.
-- **SQL Migrator**: Supports one-click, zero-dependency schema, index, and record migration to **PostgreSQL**, **MySQL**, **MariaDB**, **SQLite**, and **Microsoft SQL Server**. Handles type mappings, index constraints, and nested structures automatically.
+- **SQL Migrator**: Supports one-click, zero-dependency schema, index, and record migration to **PostgreSQL**, **MySQL**, **MariaDB**, **SQLite**, and **Microsoft SQL Server**.
 
 ---
 
@@ -161,14 +176,14 @@ MasterKeeper and SQLite are both embedded engines, but they represent different 
 | **Query Power** | Programmatic filters (no Joins or subqueries) | Full SQL (Joins, aggregations, views, triggers) | 🏆 **SQLite** (Full relational capabilities) |
 | **Concurrency** | MVCC with Copy-on-Write (100% lock-free reads) | Reader/Writer database page locks (WAL mode) | 🏆 **MasterKeeper** (Zero read contention) |
 | **Write Throughput** | Asynchronous batch writes on a background goroutine | Inline synchronous page writes (unless using async journals) | 🏆 **MasterKeeper** (Optimized for fast sequential batching) |
-| **Memory Efficiency** | Indexes kept fully in memory (requires RAM) | B-tree index pages on disk (loaded on demand) | 🏆 **SQLite** (Scales to datasets far larger than RAM) |
+| **Memory Efficiency** | B+ Tree index pages on disk (loaded on demand) | B-tree index pages on disk (loaded on demand) | 🤝 **Tie** (Both scale to datasets far larger than RAM) |
 | **Development Speed (Go)** | Type-safe generic API (`Table[ID, T]`) with struct tags | SQL syntax queries, driver setups, and ORM mapping | 🏆 **MasterKeeper** (Zero boilerplate code) |
 
 ### Architectural Deep Dive
 
-- **Concurrency & MVCC**: MasterKeeper uses a Copy-on-Write memory state. When a write transaction commits, it swaps the committed database state pointer. This means **read queries are 100% lock-free** and always run against an immutable snapshot of the database. Writers never block readers, and readers never block writers. SQLite uses database-level locking; WAL mode allows concurrent readers alongside a single writer, but readers must negotiate shared locks.
+- **Concurrency & MVCC**: MasterKeeper uses a Copy-on-Write page swapping structure. When a write transaction commits, it swaps the catalog mapping. This means **read queries are 100% lock-free** and always run against an immutable snapshot of the database. Writers never block readers, and readers never block writers. SQLite uses database-level locking; WAL mode allows concurrent readers alongside a single writer, but readers must negotiate shared locks.
 - **Persistence & Background Threading**: MasterKeeper offloads all disk writes to a dedicated background goroutine. Write operations (both WAL and table files) are batched together. This delivers high write throughput by ensuring disk sequential writes are done asynchronously without blocking the application transaction thread. SQLite writes directly within the calling application thread.
-- **Indices & Scaling**: MasterKeeper keeps all indexes (primary, unique, secondary, and ordered) **entirely in memory** as hash maps and sorted slices pointing to offset locations in the append-only data files. SQLite keeps indices on disk in a B-tree structure and uses a page cache to load parts of them into memory as needed, allowing it to scale to databases far larger than physical RAM.
+- **Indices & Scaling**: MasterKeeper keeps all indexes (primary, unique, secondary, and ordered) **directly on disk** inside B+ tree `.idx` files. Pages are loaded on demand and cached in memory using a memory-capped cache. This allows it to scale to datasets far larger than physical RAM, just like SQLite.
 
 ---
 
@@ -181,15 +196,6 @@ MasterKeeper uses a Write-Ahead Log to guarantee ACID compliance (durability and
 2. **FSync**: Depending on your durability options (`Sync`, `Batched`, or `None`), the `wal.log` file is synced to disk.
 3. **Table Storage**: Only after the WAL is securely written and synced does the background writer write the data to the active table database files (`<table_name>.db`).
 4. **Crash Recovery**: If the application crashes, MasterKeeper scans the `wal.log` during startup to replay committed transactions and roll back any uncommitted transactions, restoring the database to a transactionally consistent state.
-
-### MasterKeeper Logical WAL vs. SQLite Physical Page WAL
-While both engines use WAL, they do so at different abstraction levels:
-
-| Feature | MasterKeeper's WAL | SQLite's WAL Mode |
-| :--- | :--- | :--- |
-| **Type of Logging** | **Logical Logging**: Logs high-level operations (e.g., *Insert record X into table Y*). | **Physical Page Logging**: Logs modified database page buffers (e.g., *Write bytes Z to page 4*). |
-| **Primary Goal** | Transaction serialization, durability, and recovery for append-only storage. | Allows concurrent readers to access database pages while a writer writes page changes. |
-| **File Structure** | A single sequential `wal.log` file in the database directory. | A companion database-wal file (e.g., `mydb.db-wal`) that grows alongside the main file. |
 
 ---
 
@@ -213,59 +219,6 @@ To maintain safe concurrency and prevent transaction writer lock starvation or d
 
 ---
 
-## Stress Test Results
-
-MasterKeeper has been rigorously stress-tested for single-table and multi-table operations under both synchronous and asynchronous durabilities, concurrently saving and querying **1,000,000 records** per test.
-
-Execution summary:
-
-```
-=== RUN   TestKeeperCRUD
---- PASS: TestKeeperCRUD (0.00s)
-=== RUN   TestUniqueIndexConstraints
---- PASS: TestUniqueIndexConstraints (0.00s)
-=== RUN   TestRecovery
---- PASS: TestRecovery (0.00s)
-=== RUN   TestCompaction
---- PASS: TestCompaction (0.00s)
-=== RUN   TestQuery
---- PASS: TestQuery (0.00s)
-=== RUN   TestJSONExportImport
---- PASS: TestJSONExportImport (0.00s)
-=== RUN   TestAsyncAndBatchedDurability
-=== RUN   TestAsyncAndBatchedDurability/Mode_2
-=== RUN   TestAsyncAndBatchedDurability/Mode_1
---- PASS: TestAsyncAndBatchedDurability (0.11s)
-    --- PASS: TestAsyncAndBatchedDurability/Mode_2 (0.00s)
-    --- PASS: TestAsyncAndBatchedDurability/Mode_1 (0.11s)
-=== RUN   TestHotBackup
---- PASS: TestHotBackup (0.00s)
-=== RUN   TestSQLiteMigrationIntegration
---- PASS: TestSQLiteMigrationIntegration (0.00s)
-=== RUN   TestMigrateAllDialects
-=== RUN   TestMigrateAllDialects/PostgreSQL
-=== RUN   TestMigrateAllDialects/MySQL
-=== RUN   TestMigrateAllDialects/SQLite
-=== RUN   TestMigrateAllDialects/MSSQL
---- PASS: TestMigrateAllDialects (0.00s)
-    --- PASS: TestMigrateAllDialects/PostgreSQL (0.00s)
-    --- PASS: TestMigrateAllDialects/MySQL (0.00s)
-    --- PASS: TestMigrateAllDialects/SQLite (0.00s)
-    --- PASS: TestMigrateAllDialects/MSSQL (0.00s)
-=== RUN   TestStressSyncSingleTable
---- PASS: TestStressSyncSingleTable (25.60s)
-=== RUN   TestStressAsyncSingleTable
---- PASS: TestStressAsyncSingleTable (25.85s)
-=== RUN   TestStressSyncMultiTable
---- PASS: TestStressSyncMultiTable (19.15s)
-=== RUN   TestStressAsyncMultiTable
---- PASS: TestStressAsyncMultiTable (19.49s)
-PASS
-ok      github.com/lemadane/masterkeeper        90.319s
-```
-
----
-
 ## Production Readiness & Checklist
 
 MasterKeeper is optimized for embedded use cases requiring strict write-ahead logging (WAL), atomicity, and schema safety. Core concurrency, durability, and recovery guarantees have been rigorously verified under high-concurrency race-enabled stress tests.
@@ -276,4 +229,3 @@ Before deploying MasterKeeper to critical production environments, it is recomme
 2. **Monitoring & Telemetry**: Configure alerts on file write operations and database errors, paying special attention to WAL and snapshot flush operations.
 3. **Backup Strategy**: Implement a regular database backup routine using the built-in hot backup API (`Backup()`) and periodically verify restore integrity from those backups.
 4. **Dependency Locking**: Pin MasterKeeper to a specific commit or release tag in your `go.mod` to ensure you maintain these stability, transaction locking, and recovery fixes.
-

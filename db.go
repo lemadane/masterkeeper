@@ -63,6 +63,8 @@ type Database struct {
 	lastFlushError         error
 	lastFlushErrorMutex    sync.RWMutex
 	transactionWaitTimeout time.Duration
+	shadowIndexes          sync.Map // tableName -> *DiskBPlusTree
+	shadowIndexesMutex     sync.Mutex
 }
 
 func Open(directory string, options Options) (*Database, error) {
@@ -115,6 +117,11 @@ func Open(directory string, options Options) (*Database, error) {
 
 	recoveredState, error := database.recover(snapshotState, walRecords)
 	if error != nil {
+		database.shadowIndexes.Range(func(key, value any) bool {
+			namedIndex := value.(*NamedIndex)
+			namedIndex.Tree.Close()
+			return true
+		})
 		walManagerValue.Close()
 		return nil, fmt.Errorf("database recovery failed: %w", error)
 	}
@@ -129,6 +136,8 @@ func Open(directory string, options Options) (*Database, error) {
 			Type:      tableStateValue.EntityType,
 		})
 	}
+
+
 
 	return database, nil
 }
@@ -389,6 +398,14 @@ func (database *Database) DropTable(tableName string) (bool, error) {
 	}
 	_ = os.Remove(filepath.Join(database.directory, tableName+".db"))
 
+	// Close and delete shadow index files
+	if val, ok := database.shadowIndexes.LoadAndDelete(tableName); ok {
+		tree := val.(*DiskBPlusTree)
+		tree.Close()
+	}
+	_ = os.Remove(filepath.Join(database.directory, tableName+".idx"))
+	_ = os.Remove(filepath.Join(database.directory, tableName+".idx.root"))
+
 	return true, nil
 }
 
@@ -481,6 +498,12 @@ func (database *Database) Close() error {
 		return true
 	})
 
+	database.shadowIndexes.Range(func(key, value any) bool {
+		namedIndex := value.(*NamedIndex)
+		namedIndex.Tree.Close()
+		return true
+	})
+
 	return database.walManager.Close()
 }
 
@@ -506,8 +529,52 @@ func (database *Database) Compact() error {
 		if error != nil {
 			return error
 		}
-		if error := tableStorageValue.Compact(tableStateValue.RecordPointers); error != nil {
+
+		namedIndex, loadError := database.getShadowIndex(tableName)
+		if loadError != nil {
+			return loadError
+		}
+
+		activePointers := make(map[any]RecordPointer)
+		rangeError := namedIndex.Range(nil, nil, uint64(committed.Generation), func(keyBytes []byte, recordPointer RecordPointer) bool {
+			primaryKey, deserializeError := deserializeKey(keyBytes)
+			if deserializeError == nil {
+				activePointers[primaryKey] = recordPointer
+			}
+			return true
+		})
+		if rangeError != nil {
+			return rangeError
+		}
+
+		if error := tableStorageValue.Compact(activePointers); error != nil {
 			return fmt.Errorf("compaction of table %s failed: %w", tableName, error)
+		}
+
+		// Rebuild shadow B+ tree index with the new record pointers/offsets
+		if clearError := database.shadowClear(tableName); clearError != nil {
+			return clearError
+		}
+
+		for _, recordPointer := range activePointers {
+			recordBytes, readError := tableStorageValue.ReadRecord(recordPointer)
+			if readError != nil {
+				return readError
+			}
+
+			reflectType := tableStateValue.EntityType
+			newRecordValue := reflect.New(reflectType)
+			if unmarshalError := Unmarshal(recordBytes, newRecordValue.Interface()); unmarshalError != nil {
+				return unmarshalError
+			}
+
+			if insertError := database.shadowInsertNoCommit(tableName, newRecordValue.Elem().Interface(), recordPointer, uint64(committed.Generation)); insertError != nil {
+				return insertError
+			}
+		}
+
+		if commitError := database.shadowCommit(tableName, uint64(committed.Generation)); commitError != nil {
+			return commitError
 		}
 	}
 
@@ -533,9 +600,10 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 
 	for _, walRecord := range walRecords {
 		transactionGroups[walRecord.TransactionID] = append(transactionGroups[walRecord.TransactionID], walRecord)
-		if walRecord.Type == OpCommitTransaction {
+		switch walRecord.Type {
+		case OpCommitTransaction:
 			committedTransactionIDs = append(committedTransactionIDs, walRecord.TransactionID)
-		} else if walRecord.Type == OpRollbackTransaction {
+		case OpRollbackTransaction:
 			rolledBackTransactionIDs[walRecord.TransactionID] = struct{}{}
 		}
 	}
@@ -580,10 +648,14 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 
 	for _, transactionID := range activeCommits {
 		walRecordsGroup := transactionGroups[transactionID]
+		modifiedTables := make(map[string]bool)
+		var transGen int64 = 0
+
 		for _, walRecord := range walRecordsGroup {
 			if walRecord.Generation > currentGen {
 				currentGen = walRecord.Generation
 			}
+			transGen = walRecord.Generation
 
 			if walRecord.Type == OpBeginTransaction || walRecord.Type == OpCommitTransaction || walRecord.Type == OpRollbackTransaction {
 				continue
@@ -640,7 +712,20 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				}
 
 				id := getPrimaryKey(record)
-				oldRecordPointer, found := tableState.RecordPointers[id]
+				var oldRecordPointer RecordPointer
+				var found bool
+				namedIndex, loadError := database.getShadowIndex(tableName)
+				if loadError == nil {
+					keyBytes, serializeError := serializeKey(id)
+					if serializeError == nil {
+						foundPointer, exists, findError := namedIndex.Find(keyBytes, 0)
+						if findError == nil && exists {
+							oldRecordPointer = foundPointer
+							found = true
+						}
+					}
+				}
+
 				var oldRecord any
 				if found {
 					oldRecordBytes, error := tableStorageValue.ReadRecord(oldRecordPointer)
@@ -657,11 +742,33 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 					return nil, error
 				}
 
-				if walRecord.Type == OpInsert {
+				switch walRecord.Type {
+				case OpInsert:
 					tableState.Insert(record, recordPointer)
-				} else {
+					if shadowError := database.shadowInsertNoCommit(tableName, record, recordPointer, uint64(transGen)); shadowError != nil {
+						return nil, shadowError
+					}
+				case OpUpsert:
+					if found {
+						if shadowError := database.shadowDeleteNoCommit(tableName, id, oldRecord, uint64(transGen)); shadowError != nil {
+							return nil, shadowError
+						}
+					}
+					if shadowError := database.shadowInsertNoCommit(tableName, record, recordPointer, uint64(transGen)); shadowError != nil {
+						return nil, shadowError
+					}
+				default: // OpUpdate
 					tableState.Update(record, oldRecord, recordPointer)
+					if found {
+						if shadowError := database.shadowDeleteNoCommit(tableName, id, oldRecord, uint64(transGen)); shadowError != nil {
+							return nil, shadowError
+						}
+					}
+					if shadowError := database.shadowInsertNoCommit(tableName, record, recordPointer, uint64(transGen)); shadowError != nil {
+						return nil, shadowError
+					}
 				}
+				modifiedTables[tableName] = true
 
 			case OpDelete:
 				tableName, error := readString(payloadReader)
@@ -684,7 +791,20 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 						return nil, error
 					}
 
-					oldRecordPointer, found := tableState.RecordPointers[primaryKey]
+					var oldRecordPointer RecordPointer
+					var found bool
+					namedIndex, loadError := database.getShadowIndex(tableName)
+					if loadError == nil {
+						keyBytes, serializeError := serializeKey(primaryKey)
+						if serializeError == nil {
+							foundPointer, exists, findError := namedIndex.Find(keyBytes, 0)
+							if findError == nil && exists {
+								oldRecordPointer = foundPointer
+								found = true
+							}
+						}
+					}
+
 					var oldRecord any
 					if found {
 						oldRecordBytes, error := tableStorageValue.ReadRecord(oldRecordPointer)
@@ -696,6 +816,13 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 						}
 					}
 					tableState.Delete(primaryKey, oldRecord)
+
+					if found {
+						if shadowError := database.shadowDeleteNoCommit(tableName, primaryKey, oldRecord, uint64(transGen)); shadowError != nil {
+							return nil, shadowError
+						}
+					}
+					modifiedTables[tableName] = true
 				}
 
 			case OpClearTable:
@@ -707,6 +834,10 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				if tableState != nil {
 					tableState.Clear()
 				}
+				if shadowError := database.shadowClear(tableName); shadowError != nil {
+					return nil, shadowError
+				}
+				modifiedTables[tableName] = true
 
 			case OpCreateTable:
 				tableName, error := readString(payloadReader)
@@ -778,26 +909,6 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 					}
 
 					tableState.IndexMetadataList = append(tableState.IndexMetadataList, indexMetadata)
-					indexState := NewIndexState(indexMetadata)
-					tableState.Indexes[indexName] = indexState
-
-					// Populate
-					tableStorageValue, error := database.getTableStorage(tableName)
-					if error != nil {
-						return nil, error
-					}
-
-					for primaryKey, recordPointer := range tableState.RecordPointers {
-						recordBytes, error := tableStorageValue.ReadRecord(recordPointer)
-						if error == nil {
-							newRecordReflectValue := reflect.New(tableState.EntityType)
-							if Unmarshal(recordBytes, newRecordReflectValue.Interface()) == nil {
-								record := newRecordReflectValue.Elem().Interface()
-								indexValue := getFieldValue(record, fieldName)
-								indexState.Add(indexValue, primaryKey)
-							}
-						}
-					}
 				}
 
 			case OpDropIndex:
@@ -812,7 +923,6 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 
 				tableState := databaseState.Tables[tableName]
 				if tableState != nil {
-					delete(tableState.Indexes, indexName)
 					var newIndexMetadataList []IndexMetadata
 					for _, indexMetadata := range tableState.IndexMetadataList {
 						if indexMetadata.IndexName != indexName {
@@ -823,6 +933,12 @@ func (database *Database) recover(initialState *DatabaseState, walRecords []WalR
 				}
 			default:
 				return nil, fmt.Errorf("corrupt WAL: unknown operation type 0x%X", walRecord.Type)
+			}
+		}
+
+		for tableName := range modifiedTables {
+			if shadowError := database.shadowCommit(tableName, uint64(transGen)); shadowError != nil {
+				return nil, shadowError
 			}
 		}
 	}
@@ -933,10 +1049,24 @@ func writeSnapshot(directory string, state *DatabaseState, database *Database) e
 			return error
 		}
 
-		if error := binary.Write(writer, binary.BigEndian, int32(len(tableState.RecordPointers))); error != nil {
+		namedIndex, loadError := database.getShadowIndex(tableState.TableName)
+		if loadError != nil {
+			return loadError
+		}
+
+		var recordPointers []RecordPointer
+		rangeError := namedIndex.Range(nil, nil, uint64(state.Generation), func(keyBytes []byte, recordPointer RecordPointer) bool {
+			recordPointers = append(recordPointers, recordPointer)
+			return true
+		})
+		if rangeError != nil {
+			return rangeError
+		}
+
+		if error := binary.Write(writer, binary.BigEndian, int32(len(recordPointers))); error != nil {
 			return error
 		}
-		for _, recordPointer := range tableState.RecordPointers {
+		for _, recordPointer := range recordPointers {
 			recordBytes, error := tableStorageValue.ReadRecord(recordPointer)
 			if error != nil {
 				return error
@@ -1200,6 +1330,16 @@ func readSnapshot(directory string, database *Database) (*DatabaseState, error) 
 				return nil, error
 			}
 			tableState.Insert(record, recordPointer)
+
+			// Populate B+ Tree shadow indexes
+			if shadowInsertError := database.shadowInsertNoCommit(snapshotInfo.tableName, record, recordPointer, uint64(snapshotGen)); shadowInsertError != nil {
+				return nil, shadowInsertError
+			}
+		}
+
+		// Commit B+ Tree shadow indexes
+		if shadowCommitError := database.shadowCommit(snapshotInfo.tableName, uint64(snapshotGen)); shadowCommitError != nil {
+			return nil, shadowCommitError
 		}
 
 		databaseState.Tables[snapshotInfo.tableName] = tableState
@@ -1251,17 +1391,26 @@ func (database *Database) ExportJSON(destinationPath string) error {
 			return error
 		}
 
+		namedIndex, loadError := database.getShadowIndex(tableName)
+		if loadError != nil {
+			return loadError
+		}
+
 		var records []any
-		for _, recordPointer := range tableState.RecordPointers {
+		rangeError := namedIndex.Range(nil, nil, uint64(committed.Generation), func(keyBytes []byte, recordPointer RecordPointer) bool {
 			bytesValue, error := tableStorageValue.ReadRecord(recordPointer)
 			if error != nil {
-				return error
+				return false
 			}
 			newRecordValue := reflect.New(tableState.EntityType)
 			if error := Unmarshal(bytesValue, newRecordValue.Interface()); error != nil {
-				return error
+				return false
 			}
 			records = append(records, newRecordValue.Elem().Interface())
+			return true
+		})
+		if rangeError != nil {
+			return rangeError
 		}
 		jsonDb[tableName] = records
 	}
@@ -1446,3 +1595,223 @@ func validateSchema(idType reflect.Type, entityType reflect.Type) error {
 
 	return nil
 }
+
+func (database *Database) getShadowNamedIndex(tableName string, indexName string) (*NamedIndex, error) {
+	if value, found := database.shadowIndexes.Load(tableName); found {
+		cachedIndex := value.(*NamedIndex)
+		return &NamedIndex{
+			Tree:      cachedIndex.Tree,
+			IndexName: indexName,
+		}, nil
+	}
+
+	database.shadowIndexesMutex.Lock()
+	defer database.shadowIndexesMutex.Unlock()
+
+	// Double check cache
+	if value, found := database.shadowIndexes.Load(tableName); found {
+		cachedIndex := value.(*NamedIndex)
+		return &NamedIndex{
+			Tree:      cachedIndex.Tree,
+			IndexName: indexName,
+		}, nil
+	}
+
+	indexPath := filepath.Join(database.directory, tableName+".idx")
+	file, fileError := os.OpenFile(indexPath, os.O_CREATE|os.O_RDWR, 0644)
+	if fileError != nil {
+		return nil, fileError
+	}
+
+	tree, treeError := NewDiskBPlusTree(file)
+	if treeError != nil {
+		file.Close()
+		return nil, treeError
+	}
+
+	primaryNamedIndex := &NamedIndex{
+		Tree:      tree,
+		IndexName: "primary",
+	}
+
+	actual, loaded := database.shadowIndexes.LoadOrStore(tableName, primaryNamedIndex)
+	if loaded {
+		tree.Close()
+		cachedIndex := actual.(*NamedIndex)
+		return &NamedIndex{
+			Tree:      cachedIndex.Tree,
+			IndexName: indexName,
+		}, nil
+	}
+
+	return &NamedIndex{
+		Tree:      tree,
+		IndexName: indexName,
+	}, nil
+}
+
+func (database *Database) getShadowIndex(tableName string) (*NamedIndex, error) {
+	return database.getShadowNamedIndex(tableName, "primary")
+}
+
+func extractIndexMetadataList(tableName string, record any) []IndexMetadata {
+	entityType := reflect.TypeOf(record)
+	for entityType.Kind() == reflect.Ptr {
+		entityType = entityType.Elem()
+	}
+	if entityType.Kind() != reflect.Struct {
+		return nil
+	}
+	var indexMetadataList []IndexMetadata
+	for index := 0; index < entityType.NumField(); index++ {
+		structField := entityType.Field(index)
+		fieldMetadata := parseFieldTag(structField)
+		if fieldMetadata.IsIndex {
+			indexName := tableName + "_" + fieldMetadata.FieldName + "_idx"
+			indexMetadataList = append(indexMetadataList, IndexMetadata{
+				IndexName: indexName,
+				FieldName: fieldMetadata.FieldName,
+				Unique:    fieldMetadata.IsUnique,
+				Ordered:   fieldMetadata.IsOrdered,
+			})
+		}
+	}
+	return indexMetadataList
+}
+
+func (database *Database) shadowInsertNoCommit(tableName string, record any, pointer RecordPointer, generation uint64) error {
+	primaryKey := getPrimaryKey(record)
+	if primaryKey == nil {
+		return fmt.Errorf("primary key ID cannot be nil")
+	}
+
+	// 1. Insert primary index entry
+	primaryNamedIndex, loadError := database.getShadowIndex(tableName)
+	if loadError != nil {
+		return loadError
+	}
+
+	primaryKeyBytes, serializeError := serializeKey(primaryKey)
+	if serializeError != nil {
+		return serializeError
+	}
+
+	if _, insertError := primaryNamedIndex.InsertNoCommit(primaryKeyBytes, pointer, generation); insertError != nil {
+		return insertError
+	}
+
+	// 2. Insert secondary and unique indexes
+	indexMetadataList := extractIndexMetadataList(tableName, record)
+	for _, indexMetadata := range indexMetadataList {
+		fieldValue := getFieldValue(record, indexMetadata.FieldName)
+		if fieldValue == nil {
+			continue
+		}
+		fieldValue = canonicalizeKey(fieldValue)
+
+		namedIndex, loadError := database.getShadowNamedIndex(tableName, indexMetadata.IndexName)
+		if loadError != nil {
+			return loadError
+		}
+
+		if indexMetadata.Unique {
+			secondaryKeyBytes, serializeError := serializeKey(fieldValue)
+			if serializeError != nil {
+				return serializeError
+			}
+			if _, insertError := namedIndex.InsertNoCommit(secondaryKeyBytes, pointer, generation); insertError != nil {
+				return insertError
+			}
+		} else {
+			compositeKeyBytes, serializeError := SerializeCompositeKey(fieldValue, primaryKey)
+			if serializeError != nil {
+				return serializeError
+			}
+			if _, insertError := namedIndex.InsertNoCommit(compositeKeyBytes, pointer, generation); insertError != nil {
+				return insertError
+			}
+		}
+	}
+
+	return nil
+}
+
+func (database *Database) shadowDeleteNoCommit(tableName string, key any, oldRecord any, generation uint64) error {
+	// 1. Delete primary index entry
+	primaryNamedIndex, loadError := database.getShadowIndex(tableName)
+	if loadError != nil {
+		return loadError
+	}
+
+	primaryKeyBytes, serializeError := serializeKey(key)
+	if serializeError != nil {
+		return serializeError
+	}
+
+	if _, deleteError := primaryNamedIndex.DeleteNoCommit(primaryKeyBytes, generation); deleteError != nil {
+		return deleteError
+	}
+
+	// 2. Delete secondary and unique index entries if oldRecord is present
+	if oldRecord == nil {
+		return nil
+	}
+
+	indexMetadataList := extractIndexMetadataList(tableName, oldRecord)
+	for _, indexMetadata := range indexMetadataList {
+		fieldValue := getFieldValue(oldRecord, indexMetadata.FieldName)
+		if fieldValue == nil {
+			continue
+		}
+		fieldValue = canonicalizeKey(fieldValue)
+
+		namedIndex, loadError := database.getShadowNamedIndex(tableName, indexMetadata.IndexName)
+		if loadError != nil {
+			return loadError
+		}
+
+		if indexMetadata.Unique {
+			secondaryKeyBytes, serializeError := serializeKey(fieldValue)
+			if serializeError != nil {
+				return serializeError
+			}
+			if _, deleteError := namedIndex.DeleteNoCommit(secondaryKeyBytes, generation); deleteError != nil {
+				return deleteError
+			}
+		} else {
+			compositeKeyBytes, serializeError := SerializeCompositeKey(fieldValue, key)
+			if serializeError != nil {
+				return serializeError
+			}
+			if _, deleteError := namedIndex.DeleteNoCommit(compositeKeyBytes, generation); deleteError != nil {
+				return deleteError
+			}
+		}
+	}
+
+	return nil
+}
+
+
+func (database *Database) shadowCommit(tableName string, generation uint64) error {
+	namedIndex, loadError := database.getShadowIndex(tableName)
+	if loadError != nil {
+		return loadError
+	}
+	return namedIndex.Commit(generation)
+}
+
+func (database *Database) shadowClear(tableName string) error {
+	if value, found := database.shadowIndexes.LoadAndDelete(tableName); found {
+		namedIndex := value.(*NamedIndex)
+		namedIndex.Tree.Close()
+	}
+	indexPath := filepath.Join(database.directory, tableName+".idx")
+	_ = os.Remove(indexPath + ".root")
+	if truncateError := os.Truncate(indexPath, 0); truncateError != nil {
+		return truncateError
+	}
+	_, loadError := database.getShadowIndex(tableName)
+	return loadError
+}
+
